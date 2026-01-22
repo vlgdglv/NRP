@@ -3,8 +3,7 @@ from transformers import AutoModelForCausalLM, AutoConfig
 from peft import get_peft_model, LoraConfig, TaskType
 from utils.logger import get_logger
 
-from model.lumina_arch.modeling_chameleon import ChameleonForConditionalGeneration
-from model.lumina_arch.configuration_chameleon import ChameleonConfig
+from model.lumina_arch.chameleon import ChameleonForConditionalGeneration
 
 logger = get_logger(__name__)
 
@@ -26,16 +25,23 @@ def load_lumina_with_lora(
         local_files_only=True
     )
 
-    print("Checking module names for LoRA...")
-    for name, module in model.named_modules():
-        if "attn" in name and isinstance(module, torch.nn.Linear):
-            print(f"Found Linear Layer: {name}")
-            break
+    # print("Checking module names for LoRA...")
+    # for name, module in model.named_modules():
+    #     if "attn" in name and isinstance(module, torch.nn.Linear):
+    #         print(f"Found Linear Layer: {name}")
+    #         break
     
     peft_config = LoraConfig(
         r=lora_rank,
         lora_alpha=lora_alpha,
-        target_modules=["attn"],
+        target_modules=["q_proj", 
+                        "k_proj", 
+                        "v_proj", 
+                        "o_proj",
+                        "gate_proj", 
+                        "up_proj", 
+                        "down_proj"
+                        ],
         lora_dropout=0.05,
         bias="none",
         task_type=TaskType.CAUSAL_LM

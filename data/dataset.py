@@ -99,10 +99,13 @@ class ImageRowCollator:
         row_visible = (r_i == r_j)
 
         current_block = final_mask[before_image_length:, before_image_length:]
-
         final_mask[before_image_length:, before_image_length:] = current_block | row_visible
+        attention_mask_bool = final_mask.unsqueeze(0).unsqueeze(0).expand(B, 1, L, L)
 
-        attention_mask = final_mask.unsqueeze(0).unsqueeze(0).expand(B, 1, L, L).contiguous()
+        min_value = torch.finfo(torch.bfloat16).min 
+        attention_mask = torch.full((B, 1, L, L), min_value, dtype=torch.bfloat16)
+        attention_mask.masked_fill_(attention_mask_bool, 0.0)
+        attention_mask = attention_mask.contiguous()
 
         return {
             "input_ids": input_ids,

@@ -53,6 +53,7 @@ datasets/
 # 结果 / 可视化
 ############################
 training_outputs/
+inference_outputs/
 outputs/
 results/
 figures/

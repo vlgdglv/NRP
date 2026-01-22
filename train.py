@@ -1,4 +1,8 @@
 import os
+
+os.environ["NCCL_P2P_DISABLE"] = "1"
+os.environ["NCCL_IB_DISABLE"] = "1"
+
 import torch
 import argparse
 from transformers import Trainer, TrainingArguments
@@ -33,6 +37,7 @@ def train(args):
     )
     model = RowExpertModel(base_model)
 
+    model.base_model.gradient_checkpointing_enable()
     model.base_model.enable_input_require_grads()
 
     train_dataset = TokenDataset(data_path)
@@ -72,7 +77,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train")
     parser.add_argument("--output_dir", type=str, default="training_outputs")
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--image_width", type=int, default=49)
     parser.add_argument("--image_height", type=int, default=48)
