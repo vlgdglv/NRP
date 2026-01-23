@@ -6,7 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 from utils.logger import get_logger
-
+from utils import is_rank0
 
 logger = get_logger(__name__)
 
@@ -29,7 +29,8 @@ class TokenDataset(Dataset):
             except Exception as e:
                 logger.error(f"Failed to load {f_path}: {e}")
         
-        logger.info(f"Found and loaded {len(self.samples)} samples into RAM from {data_dir}.")
+        if is_rank0():
+            logger.info(f"Found and loaded {len(self.samples)} samples into RAM from {data_dir}.")
 
 
     def __len__(self):

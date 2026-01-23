@@ -75,6 +75,8 @@ if __name__ == "__main__":
     parser.add_argument("--image_top_k", type=int, default=2000)
     parser.add_argument("--text_top_k", type=int, default=10)
     parser.add_argument("--cfg_guidance_scale", type=float, default=3.0)
+    parser.add_argument("--lora_path", type=str, default=None)
+    parser.add_argument("--row_parallel", action="store_true")
     args = parser.parse_args()
     
     model_path = args.model_path
@@ -86,6 +88,11 @@ if __name__ == "__main__":
     image_top_k = args.image_top_k
     text_top_k = args.text_top_k
     cfg_guidance_scale = args.cfg_guidance_scale
+    
+    row_parallel = args.row_parallel
+    lora_path = None
+    if row_parallel and args.lora_path is not None:
+        lora_path = args.lora_path
 
     template_condition_sentences = f"Generate an image of {target_size_w}x{target_size_h} according to the following prompt:\n"
 
@@ -95,6 +102,8 @@ if __name__ == "__main__":
         precision=args.dtype,
         target_size=target_size,
         device = device,
+        row_parallel=row_parallel,
+        lora_path=lora_path
     )
 
     collected_images = []

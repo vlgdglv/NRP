@@ -10,10 +10,16 @@ import torch
 import transformers
 from transformers import GenerationConfig, TextStreamer
 from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList, LogitsWarper
+from peft import PeftModel
 
 from inference.lumina.data.item_processor import FlexARItemProcessor
 from model.lumina_arch.chameleon import ChameleonForConditionalGeneration
-from inference.sampler import SamplerEngine
+from inference.sampler import SamplerEngine, RowParallelSampler
+
+
+def get_token_row(token_idx, row_len):
+    return token_idx // row_len + 1 if token_idx % row_len != 0 else token_idx // row_len
+
 
 class LLMImageStartTriggeredUnbatchedClassifierFreeGuidanceLogitsProcessor(LogitsProcessor):
     r"""
@@ -134,7 +140,6 @@ class LLMImageStartTriggeredUnbatchedClassifierFreeGuidanceLogitsProcessor(Logit
 
 
 class MultiModalLogitsProcessor(LogitsProcessor):
-
     def __init__(
         self,
         image_start_token_id=None,
@@ -202,19 +207,34 @@ class MultiModalLogitsProcessor(LogitsProcessor):
                     # print(f"h_latent_dim: {self.h_latent_dim}, w_latent_dim: {self.w_latent_dim}")
 
                 tokens = input_ids[0][self.image_start_token_id_index + 3 :]
-                if (len(tokens) + 1) % (self.w_latent_dim + 1) == 0:
-                    new_line_constrained_scores = torch.full_like(scores, -math.inf)
-                    new_line_constrained_scores[:, self.image_next_line_token_id] = 0
-                    # print(f"new line: {len(tokens)+1}")
-                    return new_line_constrained_scores
-                elif (len(tokens) + 1) == (self.w_latent_dim + 1) * self.h_latent_dim + 1:
-                    eos_image_constrained_scores = torch.full_like(scores, -math.inf)
-                    eos_image_constrained_scores[:, self.image_end_token_id] = 0
-                    # print(f"eos image: {len(tokens)+1}")
-                    return eos_image_constrained_scores
-                elif (len(tokens) + 1) % (self.w_latent_dim + 1) != 0:
-                    image_constrained_scores = torch.where(self.suppress_token_mask, -float("inf"), scores)
-                    return image_constrained_scores
+                new_predicted_num = scores.shape[-2]
+                
+                # first mask everything except image
+                image_constrained_scores = torch.where(
+                    self.suppress_token_mask.to(scores.device), 
+                    -float("inf"), 
+                    scores
+                )
+
+                # check whether this line of tokens contains eol or eos
+                # happen to be last line or last token
+                if (len(tokens) + new_predicted_num) % (self.w_latent_dim + 1) == 0:
+                    image_constrained_scores[..., -1, :] = -math.inf
+                    image_constrained_scores[..., -1, self.image_next_line_token_id] = 0
+                if (len(tokens) + new_predicted_num) == (self.w_latent_dim + 1) * self.h_latent_dim + 1:
+                    image_constrained_scores[..., -1, :] = -math.inf
+                    image_constrained_scores[..., -1, self.image_end_token_id] = 0
+
+                # corner case: covers more than one row:
+                new_token_start_row_cnt = get_token_row((len(tokens) + 1), self.w_latent_dim + 1)
+                new_token_end_row_cnt = get_token_row(len(tokens) + new_predicted_num, self.w_latent_dim + 1)
+                if new_token_start_row_cnt < new_token_end_row_cnt:
+                    # find all eol place
+                    eol_indices = [ ridx * (self.w_latent_dim + 1) - (len(tokens)) -1 for ridx in (range(new_token_start_row_cnt, new_token_end_row_cnt))]
+                    for eol_index in eol_indices:
+                        image_constrained_scores[..., eol_index, :] = -math.inf
+                        image_constrained_scores[..., eol_index, self.image_next_line_token_id] = 0
+                return image_constrained_scores
         else:
             print("Something wrong in the decoding process.")
 
@@ -277,7 +297,12 @@ class FlexARInferenceSolver:
 
         return parser
 
-    def __init__(self, model_path, vae_tokenizer_path, precision, target_size=512, device="cpu"):
+    def __init__(
+        self, 
+        model_path, vae_tokenizer_path, 
+        precision, target_size=512, device="cpu",
+        row_parallel=False, lora_path=None, 
+    ):
         self.dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         self.device = device
 
@@ -289,7 +314,31 @@ class FlexARInferenceSolver:
 
         self.item_processor = FlexARItemProcessor(target_size=target_size, vae_tokenizer_path=vae_tokenizer_path)
         self.inbatch_cfg = True
-        self.sampler = SamplerEngine(self.model, self.item_processor.tokenizer)
+        
+        
+        if row_parallel:
+            lora_model = PeftModel.from_pretrained(
+                self.model,
+                lora_path,
+                torch_dtype=self.dtype,
+                device_map=device,
+            )
+
+            print("model type:", type(lora_model))
+            print("has peft_config:", hasattr(lora_model, "peft_config"))
+            print("peft_config:", getattr(lora_model, "peft_config", None))
+
+            self.sampler = RowParallelSampler(
+                # self.model,
+                lora_model,
+                self.item_processor.tokenizer,
+                
+                image_start_token=self.item_processor.token2id(self.item_processor.image_start_token),
+                image_end_token=self.item_processor.token2id(self.item_processor.image_end_token),
+                image_end_line_token=self.item_processor.token2id(self.item_processor.new_line_token)
+            )
+        else:
+            self.sampler = SamplerEngine(self.model, self.item_processor.tokenizer)
 
     def get_streamer(self):
         return TextStreamer(self.item_processor.tokenizer)
@@ -304,6 +353,7 @@ class FlexARInferenceSolver:
         cfg_guidance_scale=None,
         logits_processor=None,
         seed: int = None,
+        **kwargs
     ):
 
         conversations = []
@@ -346,9 +396,8 @@ class FlexARInferenceSolver:
                 cfg_scale=cfg_guidance_scale,
                 seed=seed,
             )
-        print(token_sequence.shape)
-        image_tokens = token_sequence[0][prompt_len:].tolist()
-        
+        image_tokens = token_sequence[0][prompt_len:-1].tolist()
+    
         return self.decode_ids(image_tokens)
 
     def decode_ids(self, tokens: List[int]):
@@ -358,17 +407,13 @@ class FlexARInferenceSolver:
         while i < len(tokens):
             token_id = tokens[i]
             if token_id == self.item_processor.token2id(self.item_processor.image_start_token):
-                cache = []
-                for j in range(i + 1, len(tokens)):
-                    if tokens[j] != self.item_processor.token2id(self.item_processor.image_end_token):
-                        cache.append(tokens[j])
-                        i = j + 1
-                    else:
-                        image = self.decode_image(cache)
-                        generated_images.append(image)
-                        generation_result_processed.append(self.item_processor.token2id("<|image|>"))
-                        i = j + 1
-                        break
+                begin_img_idx = i
+                end_img_idx = tokens.index(self.item_processor.token2id(self.item_processor.image_end_token), begin_img_idx)
+                cache = tokens[begin_img_idx:end_img_idx]
+                image = self.decode_image(cache)
+                generated_images.append(image)
+                generation_result_processed.append(self.item_processor.token2id("<|image|>"))
+                i = end_img_idx + 1
             else:
                 generation_result_processed.append(token_id)
                 i += 1

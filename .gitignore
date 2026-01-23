@@ -25,9 +25,10 @@ ENV/
 ############################
 logs/
 log/
-runs/          # tensorboard 默认目录
-wandb/         # wandb 实验
+runs/
+wandb/
 lightning_logs/
+wandb/
 
 ############################
 # 模型 & 中间结果

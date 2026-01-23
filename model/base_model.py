@@ -21,7 +21,7 @@ def load_lumina_with_lora(
         model_path,
         config=config,
         torch_dtype=torch.bfloat16,
-        device_map=device,
+        device_map=None,
         local_files_only=True
     )
 

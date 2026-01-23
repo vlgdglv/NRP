@@ -6,7 +6,8 @@ class RowExpertModel(nn.Module):
     def __init__(self, base_model):
         super().__init__()
         self.base_model = base_model
-    
+        self.config = getattr(base_model, "config", None)
+        
     def forward(self, input_ids, attention_mask, labels=None):
         outputs = self.base_model(
             input_ids=input_ids,

@@ -18,7 +18,6 @@ logger = get_logger(__name__)
 def train(args):
     model_path = args.model_path
     data_path = args.data_path
-    output_dir = args.output_dir
     epochs = args.epochs
     batch_size = args.batch_size
     lerarning_rate = args.learning_rate
@@ -27,6 +26,9 @@ def train(args):
     lora_rank = args.lora_rank
     lora_alpha = args.lora_alpha
 
+    run_name = args.run_name or f"lora_{lora_rank}_{lora_alpha}_{epochs}_{batch_size}_{lerarning_rate}"
+    output_dir = os.path.join(args.output_dir, run_name)
+    
     device = "cuda"
 
     base_model = load_lumina_with_lora(
@@ -47,17 +49,20 @@ def train(args):
         output_dir=output_dir,
         num_train_epochs=epochs,
         learning_rate=lerarning_rate,
+        warmup_ratio=0.05,
+        lr_scheduler_type="cosine",
         per_device_train_batch_size=batch_size,
         bf16=True,
-        save_strategy="epoch",
+        save_strategy=args.save_strategy,
         ddp_find_unused_parameters=False,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         dataloader_num_workers=4,
         remove_unused_columns=False,
-        run_name=args.run_name,
+        run_name=run_name,
         logging_first_step=True,
         logging_steps=10,
         report_to="wandb" if args.enable_wandb else "none",
-
+        deepspeed=args.deepspeed
     )
 
     trainer = Trainer(
@@ -71,6 +76,7 @@ def train(args):
 
     model.base_model.save_pretrained(output_dir)
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Lumina-mGPT-7B-768")
@@ -78,13 +84,17 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="training_outputs")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--image_width", type=int, default=49)
+    parser.add_argument("--save_strategy", type=str, default="no") # "no", "epoch", "steps"
+    parser.add_argument("--image_width", type=int, default=49) # include end-of-line token
     parser.add_argument("--image_height", type=int, default=48)
     parser.add_argument("--lora_rank", type=int, default=64)
     parser.add_argument("--lora_alpha", type=int, default=128)
     parser.add_argument("--enable_wandb", action="store_true")
-    parser.add_argument("--run_name", type=str, default="Lumina-mGPT-7B-768")
+    parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument("--local_rank", type=int, default=-1)
+    parser.add_argument("--deepspeed", type=str, default=None)
     args = parser.parse_args()
 
     train(args)
