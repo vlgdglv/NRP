@@ -268,9 +268,11 @@ class RowParallelSampler(SamplerEngine):
             ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
             attention_mask = torch.cat([attention_mask, ones], dim=-1)
             mask4d = self._build_row_bidirectional_mask(attention_mask, input_ids.shape[-1])
+            
             row_output = self.model(
                 input_ids=input_ids,
                 past_key_values=past_key_values,
+                # attention_mask=attention_mask,
                 attention_mask=mask4d,
                 use_cache=True,
                 return_dict=True,
@@ -297,10 +299,11 @@ class RowParallelSampler(SamplerEngine):
 
             if parallel_as_draft:
                 rollback_kv_cache(past_key_values, input_ids.shape[-1])
+                input_ids = next_row_token 
                 input_ids = torch.roll(input_ids, shifts=1, dims=0)
                 input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
-
                 with self.model.disable_adapter():
+                    # print(input_ids.shape, attention_mask.shape)
                     next_row_token, outputs = self._forward_and_sample(
                         input_ids,
                         attention_mask,

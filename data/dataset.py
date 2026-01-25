@@ -88,19 +88,21 @@ class ImageRowCollator:
         labels[:, :before_image_length] = self.invalid_label
 
         casual_mask = torch.tril(torch.ones((L, L), dtype=torch.bool))
-        final_mask = casual_mask.clone()
+        
+        use_standard_causal = True
+        if use_standard_causal:
+            final_mask = casual_mask.clone()
+        else:
+            final_mask = casual_mask.clone()
+            img_range = torch.arange(self.image_len)
+            row_ids = img_range // self.W
+            r_i = row_ids.unsqueeze(1)
+            r_j = row_ids.unsqueeze(0)
+            row_visible = (r_i == r_j)
 
-        img_range = torch.arange(self.image_len)
-
-        row_ids = img_range // self.W
-
-        r_i = row_ids.unsqueeze(1)
-        r_j = row_ids.unsqueeze(0)
-
-        row_visible = (r_i == r_j)
-
-        current_block = final_mask[before_image_length:, before_image_length:]
-        final_mask[before_image_length:, before_image_length:] = current_block | row_visible
+            current_block = final_mask[before_image_length:, before_image_length:]
+            final_mask[before_image_length:, before_image_length:] = current_block | row_visible
+        
         attention_mask_bool = final_mask.unsqueeze(0).unsqueeze(0).expand(B, 1, L, L)
 
         min_value = torch.finfo(torch.bfloat16).min 
