@@ -25,8 +25,9 @@ def train(args):
     image_height = args.image_height
     lora_rank = args.lora_rank
     lora_alpha = args.lora_alpha
+    use_standard_causal = args.use_standard_causal
 
-    run_name = args.run_name or f"lora_{lora_rank}_{lora_alpha}_{epochs}_{batch_size}_{lerarning_rate}"
+    run_name = args.run_name or f"lora_{lora_rank}_{lora_alpha}_{epochs}_{batch_size}_{lerarning_rate}_{'cm' if use_standard_causal else 'bm'}"
     output_dir = os.path.join(args.output_dir, run_name)
     
     device = "cuda"
@@ -37,13 +38,25 @@ def train(args):
         lora_rank=lora_rank, 
         lora_alpha=lora_alpha
     )
-    model = RowExpertModel(base_model)
+    
+    losses = args.losses
+    use_ce = True if "ce" in losses else False
+    use_kd = True if "kd" in losses else False
+
+    model = RowExpertModel(
+        base_model,
+        use_ce=use_ce,
+        ce_weight=args.ce_weight,
+        use_kd=use_kd,
+        kd_weight=args.kd_weight,
+        kd_temp=args.kd_temp        
+    )
 
     model.base_model.gradient_checkpointing_enable()
     model.base_model.enable_input_require_grads()
 
     train_dataset = TokenDataset(data_path)
-    collator = ImageRowCollator(image_width=image_width, image_height=image_height)
+    collator = ImageRowCollator(image_width=image_width, image_height=image_height, use_standard_causal=use_standard_causal)
     
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -81,7 +94,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Lumina-mGPT-7B-768")
     parser.add_argument("--data_path", type=str, default="/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train")
-    parser.add_argument("--output_dir", type=str, default="training_outputs")
+    parser.add_argument("--output_dir", type=str, default="training_outputs/lumina")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
@@ -91,6 +104,11 @@ if __name__ == "__main__":
     parser.add_argument("--image_height", type=int, default=48)
     parser.add_argument("--lora_rank", type=int, default=64)
     parser.add_argument("--lora_alpha", type=int, default=128)
+    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd"], )
+    parser.add_argument("--ce_weight", type=float, default=1.0)
+    parser.add_argument("--kd_weight", type=float, default=1.0)
+    parser.add_argument("--kd_temp", type=float, default=1.0)
+    parser.add_argument("--use_standard_causal", action="store_true")
     parser.add_argument("--enable_wandb", action="store_true")
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--local_rank", type=int, default=-1)
