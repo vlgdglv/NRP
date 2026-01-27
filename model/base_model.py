@@ -2,6 +2,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoConfig
 from peft import get_peft_model, LoraConfig, TaskType
 from utils.logger import get_logger
+from utils import is_rank0
 
 from model.lumina_arch.chameleon import ChameleonForConditionalGeneration
 
@@ -24,7 +25,9 @@ def load_lumina_with_lora(
         device_map=None,
         local_files_only=True
     )
-
+    
+    model.model.vqmodel.to("cpu")
+    
     # print("Checking module names for LoRA...")
     # for name, module in model.named_modules():
     #     if "attn" in name and isinstance(module, torch.nn.Linear):
@@ -48,7 +51,12 @@ def load_lumina_with_lora(
     )
 
     model = get_peft_model(model, peft_config)
-    model.print_trainable_parameters()
+    
+    if is_rank0():
+        print("model type:", type(model))
+        print("has peft_config:", hasattr(model, "peft_config"))
+        print("peft_config:", getattr(model, "peft_config", None))
+        model.print_trainable_parameters()
 
     return model
 

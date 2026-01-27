@@ -13,6 +13,10 @@ from utils import rollback_kv_cache
 logger = get_logger(__name__)
 
 
+DO_EVAL_DRAFT = True
+RT_SAVE_NAME = "full_ar"
+# RT_SAVE_NAME = "lora_64_128_10_2_0.0001_bm"
+
 def set_seed(seed: int):
     """
     Args:
@@ -175,7 +179,7 @@ class RowParallelSampler(SamplerEngine):
         self.image_start_token = image_start_token
         self.image_end_token = image_end_token
         self.image_end_line_token = image_end_line_token
-        
+        self.inner_cnt = 0
 
     def sample(
         self,
@@ -190,8 +194,8 @@ class RowParallelSampler(SamplerEngine):
         cfg_scale: float = 3.0,
         seed: int = None,
         use_cache: bool = True,
-        ar_rows: int = 1,
-        parallel_as_draft: bool = True,
+        ar_rows: int = 48,
+        parallel_as_draft: bool = False,
         **kwargs
     ):
         is_prefill = True
@@ -222,8 +226,8 @@ class RowParallelSampler(SamplerEngine):
             attention_mask[1::2, :, :prefill_length - 1] = 0
 
         ar_row_done = False
-
-        # self.model.disable_adapter()
+        generated_hidden_states, generated_tokens = [], []
+        
         with self.model.disable_adapter():
             while True:
                 next_token, outputs = self._forward_and_sample(
@@ -239,7 +243,9 @@ class RowParallelSampler(SamplerEngine):
                     is_prefill
                 )
                 past_key_values = outputs.past_key_values
-
+                generated_hidden_states.append(outputs.logits[:, -1:, :])
+                generated_tokens.append(next_token)
+                
                 token_sequence = torch.cat([token_sequence, next_token], dim=-1)
                 
                 input_ids = next_token.repeat(2, 1) if do_cfg else next_token
@@ -258,17 +264,25 @@ class RowParallelSampler(SamplerEngine):
 
         assert self.img_h is not None and self.img_w is not None
         remain_rows = self.img_h - ar_rows
+        
+        if DO_EVAL_DRAFT is not None and DO_EVAL_DRAFT and remain_rows == 0:
+            self.inner_cnt += 1
+            generated_hidden_states = torch.cat(generated_hidden_states, dim=1).detach().cpu()
+            generated_tokens = torch.cat(generated_tokens, dim=-1).detach().cpu()
+            torch.save({
+                "tokens": generated_tokens,
+                "hidden_states": generated_hidden_states
+            }, f"testing_fields/data_runtime/{RT_SAVE_NAME}/sample_{self.inner_cnt}.pt")
+            logger.info(f"Full ar states saved at sample_{self.inner_cnt}.pt., tokens: {generated_tokens.shape}, hidden_states: {generated_hidden_states.shape}")
 
         input_ids = token_sequence[:, -(self.img_w+1):]
 
         # self.model.enable_adapter()
         for rows in range(remain_rows):
-            
             input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
             ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
             attention_mask = torch.cat([attention_mask, ones], dim=-1)
             mask4d = self._build_row_bidirectional_mask(attention_mask, input_ids.shape[-1])
-            
             row_output = self.model(
                 input_ids=input_ids,
                 past_key_values=past_key_values,
@@ -278,14 +292,15 @@ class RowParallelSampler(SamplerEngine):
                 return_dict=True,
             )
             row_logits = row_output.logits
+            if not parallel_as_draft:
+                generated_hidden_states.append(row_logits)
+                
             past_key_values = row_output.past_key_values
-
             if do_cfg:
                 cond, uncond = row_logits.chunk(2, dim=0)
                 row_logits = uncond + cfg_scale * (cond - uncond)
-
             scores = logits_processor(token_sequence, row_logits)
-
+            
             if do_sample:
                 probs = torch.nn.functional.softmax(scores / temperature, dim=-1)
                 next_row_token = torch.multinomial(
@@ -295,8 +310,9 @@ class RowParallelSampler(SamplerEngine):
                 ).view(1, -1)
             else:
                 next_row_token = torch.argmax(scores, dim=-1, keepdim=True)
-
-
+            if not parallel_as_draft:
+                generated_tokens.append(next_row_token)
+                
             if parallel_as_draft:
                 rollback_kv_cache(past_key_values, input_ids.shape[-1])
                 input_ids = next_row_token 
@@ -318,14 +334,14 @@ class RowParallelSampler(SamplerEngine):
                         is_multi_token=True
                     )
                     past_key_values = outputs.past_key_values
-
+                    generated_hidden_states.append(outputs.logits)
+                    
                     token_sequence = torch.cat([token_sequence, next_row_token], dim=-1)
                     input_ids = next_row_token
             else:
                 token_sequence = torch.cat([token_sequence, next_row_token], dim=-1)
                 input_ids = next_row_token
 
-        
         input_ids = token_sequence[:, -1]
         input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
         
@@ -345,16 +361,23 @@ class RowParallelSampler(SamplerEngine):
                     is_prefill=False,
                 )
                 past_key_values = outputs.past_key_values
-
                 token_sequence = torch.cat([token_sequence, next_token], dim=-1)
-                
                 input_ids = next_token.repeat(2, 1) if do_cfg else next_token
-                
                 ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
                 attention_mask = torch.cat([attention_mask, ones], dim=-1)
-                
                 if (next_token.item() == eos_token_id) or (token_sequence.shape[-1] == max_length):
                     break
+        
+        if DO_EVAL_DRAFT is not None and DO_EVAL_DRAFT and remain_rows != 0:
+            self.inner_cnt += 1
+            generated_hidden_states = torch.cat(generated_hidden_states, dim=1).detach().cpu()
+            generated_tokens = torch.cat(generated_tokens, dim=-1).detach().cpu()
+            torch.save({
+                "tokens": generated_tokens,
+                "hidden_states": generated_hidden_states
+            }, f"testing_fields/data_runtime/{RT_SAVE_NAME}/sample_{self.inner_cnt}.pt")
+            logger.info(f"Row parallel states saved at sample_{self.inner_cnt}.pt., tokens: {generated_tokens.shape}, hidden_states: {generated_hidden_states.shape}")
+
 
         return token_sequence
 

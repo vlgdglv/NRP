@@ -17,7 +17,9 @@ class TokenDataset(Dataset):
         self.samples = []
         files = sorted(glob.glob(os.path.join(data_dir, f"*{file_ext}")))
 
-        for f_path in tqdm(files):
+        iterator = tqdm(files) if is_rank0() else files
+
+        for f_path in iterator:
             try:
                 payload =  torch.load(f_path, map_location="cpu", weights_only=True)
                 token_seq = payload["tokens"]
@@ -58,6 +60,7 @@ class ImageRowCollator:
         image_width: int,
         image_height: int,
         pad_token_id: int = 0,
+        use_standard_causal: bool = False
     ):
         self.W = image_width
         self.H = image_height
@@ -68,6 +71,7 @@ class ImageRowCollator:
         self.image_start_length = 3
 
         self.invalid_label = -100
+        self.use_standard_causal = use_standard_causal
 
     def __call__(self, batch):
         # batch: List[Dict[str, torch.Tensor]]
@@ -89,8 +93,7 @@ class ImageRowCollator:
 
         casual_mask = torch.tril(torch.ones((L, L), dtype=torch.bool))
         
-        use_standard_causal = True
-        if use_standard_causal:
+        if self.use_standard_causal:
             final_mask = casual_mask.clone()
         else:
             final_mask = casual_mask.clone()
