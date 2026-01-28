@@ -43,7 +43,8 @@ def load_lumina_with_lora(
                         "o_proj",
                         "gate_proj", 
                         "up_proj", 
-                        "down_proj"
+                        "down_proj",
+                        "lm_head"
                         ],
         lora_dropout=0.05,
         bias="none",

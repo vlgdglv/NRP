@@ -56,7 +56,12 @@ def train(args):
     model.base_model.enable_input_require_grads()
 
     train_dataset = TokenDataset(data_path)
-    collator = ImageRowCollator(image_width=image_width, image_height=image_height, use_standard_causal=use_standard_causal)
+    collator = ImageRowCollator(
+        image_width=image_width, 
+        image_height=image_height, 
+        use_standard_causal=use_standard_causal, 
+        block_size=args.block_size
+    )
     
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -67,6 +72,7 @@ def train(args):
         per_device_train_batch_size=batch_size,
         bf16=True,
         save_strategy=args.save_strategy,
+        save_steps=args.save_steps,
         ddp_find_unused_parameters=False,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         dataloader_num_workers=4,
@@ -96,10 +102,12 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train")
     parser.add_argument("--output_dir", type=str, default="training_outputs/lumina")
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--block_size", type=int, default=48)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--save_strategy", type=str, default="no") # "no", "epoch", "steps"
+    parser.add_argument("--save_strategy", type=str, default="steps") # "no", "epoch", "steps"
+    parser.add_argument("--save_steps", type=int, default=1000)
     parser.add_argument("--image_width", type=int, default=49) # include end-of-line token
     parser.add_argument("--image_height", type=int, default=48)
     parser.add_argument("--lora_rank", type=int, default=64)

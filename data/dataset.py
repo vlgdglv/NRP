@@ -60,58 +60,119 @@ class ImageRowCollator:
         image_width: int,
         image_height: int,
         pad_token_id: int = 0,
-        use_standard_causal: bool = False
+        use_standard_causal: bool = False,
+        block_size: int = 48,
     ):
         self.W = image_width
         self.H = image_height
         self.pad_token_id = pad_token_id
         self.image_len = self.W * self.H
+        
+        self.block_size = block_size
+        self.img_W = self.W - 1
+        self.num_blocks = (self.img_W + self.block_size - 1) // self.block_size
+        self.last_block_id = (self.img_W - 1) // self.block_size
+        self.first_block_len = min(self.block_size, self.img_W)
 
         self.image_ending_length = 2
         self.image_start_length = 3
-
+        
         self.invalid_label = -100
         self.use_standard_causal = use_standard_causal
+        
+        self.eoi_token_id = 8196
+        self.boi_token_id = 8197
+        self.eol_token_id = 8803
+        self.eos_token_id = 8710
+        
 
     def __call__(self, batch):
         # batch: List[Dict[str, torch.Tensor]]
         check_image(batch, self.W, self.H)
-        token_ids = [sample["input_ids"][:-self.image_ending_length] for sample in batch]
+        token_ids = [sample["input_ids"] for sample in batch]
 
         input_ids = pad_sequence(token_ids, batch_first=True, padding_value=self.pad_token_id)
-
+        
         B, L = input_ids.shape
+        device = input_ids.device
 
-        labels = input_ids.clone()
-        labels = torch.roll(labels, shifts=-self.W, dims=1)
-
-        labels[:, -self.W] = self.invalid_label
-        labels[input_ids == self.pad_token_id] = self.invalid_label
-
-        before_image_length = L - self.image_len
-        labels[:, :before_image_length] = self.invalid_label
-
-        casual_mask = torch.tril(torch.ones((L, L), dtype=torch.bool))
+        labels = torch.full_like(input_ids, self.invalid_label)
+        causal_mask = torch.tril(torch.ones((L, L), dtype=torch.bool, device=device))
+        final_mask_bool = causal_mask.unsqueeze(0).expand(B, L, L).clone() # (B, L, L)
         
-        if self.use_standard_causal:
-            final_mask = casual_mask.clone()
-        else:
-            final_mask = casual_mask.clone()
-            img_range = torch.arange(self.image_len)
-            row_ids = img_range // self.W
-            r_i = row_ids.unsqueeze(1)
-            r_j = row_ids.unsqueeze(0)
-            row_visible = (r_i == r_j)
-
-            current_block = final_mask[before_image_length:, before_image_length:]
-            final_mask[before_image_length:, before_image_length:] = current_block | row_visible
         
-        attention_mask_bool = final_mask.unsqueeze(0).unsqueeze(0).expand(B, 1, L, L)
+        for i in range(B):
+            seq = input_ids[i]
+            
+            img_end_pos = (seq == self.eoi_token_id).nonzero(as_tuple=False)
+            if img_end_pos.numel() == 0: continue
+            
+            img_end_pos = int(img_end_pos[0].item())
+            img_tokens_begin = img_end_pos - self.image_len
+            img_tokens_end = img_end_pos
+
+            # print(seq[img_tokens_begin-3], seq[img_tokens_begin-2], seq[img_tokens_begin-1], seq[img_tokens_begin])
+            for r in range(self.H):
+                row_base = img_tokens_begin + r * self.W
+                
+                for b in range(self.num_blocks):
+                    c0 = b * self.block_size
+                    c1 = min((b + 1) * self.block_size, self.img_W)
+                    
+                    src_idx = torch.arange(row_base + c0, row_base + c1, device=device)
+                    if b < self.num_blocks - 1:
+                        tgt_c0 = (b + 1) * self.block_size
+                        tgt_c1 = min((b + 2) * self.block_size, self.img_W)
+                        tgt_idx = torch.arange(row_base + tgt_c0, row_base + tgt_c1, device=device)
+                    else:
+                        if r == self.H-1: continue
+                        # assert seq[src_idx[-1]+1] == self.eol_token_id
+                        next_row_base = img_tokens_begin + (r + 1) * self.W
+                        tgt_idx = torch.arange(next_row_base + 0, next_row_base + self.first_block_len, device=device)
+                        
+                    n = min(src_idx.numel(), tgt_idx.numel())
+                    src_idx, tgt_idx = src_idx[:n], tgt_idx[:n]
+                    labels[i, src_idx] = input_ids[i, tgt_idx]
+                    
+            labels[i, seq == self.pad_token_id] = self.invalid_label
+            labels[i, seq == self.eos_token_id] = self.invalid_label
+            labels[i, :img_tokens_begin] = self.invalid_label
+            
+            if self.use_standard_causal:
+                pass
+            else:
+                seg_len = self.image_len
+                seg_pos = torch.arange(seg_len, device=device)
+                
+                row_id = seg_pos // self.W
+                col_id = seg_pos % self.W
+                is_eol = (col_id == self.W - 1)
+            
+                block_id = torch.empty_like(col_id)
+                block_id[~is_eol] = (col_id[~is_eol] // self.block_size)
+                block_id[is_eol] = self.last_block_id
+                
+                r_i = row_id.unsqueeze(1)
+                r_j = row_id.unsqueeze(0)
+                b_i = block_id.unsqueeze(1)
+                b_j = block_id.unsqueeze(0)
+                
+                block_visible = (r_i == r_j) & (b_j <= b_i)
+                
+                abs_idx = torch.arange(img_tokens_begin, img_tokens_end, device=device)
+                final_mask_bool[i, abs_idx.unsqueeze(1), abs_idx.unsqueeze(0)] |= block_visible
+            pad_pos = (seq == self.pad_token_id).nonzero(as_tuple=False)
+            if pad_pos.numel() > 0:
+                pad_pos = pad_pos.squeeze(-1)
+                final_mask_bool[i, :, pad_pos] = False  
+
+        attention_mask_bool = final_mask_bool.unsqueeze(1)
 
         min_value = torch.finfo(torch.bfloat16).min 
         attention_mask = torch.full((B, 1, L, L), min_value, dtype=torch.bfloat16)
         attention_mask.masked_fill_(attention_mask_bool, 0.0)
         attention_mask = attention_mask.contiguous()
+    
 
         return {
             "input_ids": input_ids,
@@ -123,21 +184,22 @@ def check_image(batch, W=49, H=48):
     img_length = W * H
     for sample in batch:
         token_ids = sample["input_ids"]
-        assert token_ids[-1] == 8710
-        assert token_ids[-2] == 8196
+        assert token_ids[-1] == 8710    # end of sequence
+        assert token_ids[-2] == 8196    # end of image
         prompt_len = len(token_ids) - 2 - 3 - img_length
-        assert token_ids[prompt_len-1] == 8710
-        assert token_ids[prompt_len] == 8197
+        assert token_ids[prompt_len-1] == 8710 # end of sequence (text prompt end)
+        assert token_ids[prompt_len] == 8197 # start of image
         for idx in range(prompt_len+2, prompt_len+2+img_length, W):
-            assert token_ids[idx+W] == 8803
+            assert token_ids[idx+W] == 8803 # 
 
 
-def create_dataloader(data_dir, batch_size=32, image_width=49, image_height=48):
+def create_dataloader(data_dir, batch_size=32, image_width=49, image_height=48, block_size=24):
     dataset = TokenDataset(data_dir)
 
     collator = ImageRowCollator(
         image_width=image_width,
-        image_height=image_height
+        image_height=image_height,
+        block_size=block_size,
     )
 
     num_workers = min(os.cpu_count(), 8)
@@ -148,7 +210,7 @@ def create_dataloader(data_dir, batch_size=32, image_width=49, image_height=48):
         shuffle=True,
         collate_fn=collator,
 
-        num_workers=num_workers,
+        num_workers=1,
         pin_memory=True,
         persistent_workers=False, # False for testing
         prefetch_factor=2,
@@ -171,7 +233,7 @@ if __name__ == "__main__":
     base_tensor_bytes = 0
 
     COCO17_path = "/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train"
-    B, N, NB = 32, 100, True
+    B, N, NB = 32, 1, True
     cnt = 0
     loader = create_dataloader(COCO17_path, batch_size=B)
     Lmax = 0

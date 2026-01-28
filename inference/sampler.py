@@ -13,7 +13,7 @@ from utils import rollback_kv_cache
 logger = get_logger(__name__)
 
 
-DO_EVAL_DRAFT = True
+DO_EVAL_DRAFT = False
 RT_SAVE_NAME = "full_ar"
 # RT_SAVE_NAME = "lora_64_128_10_2_0.0001_bm"
 
@@ -194,7 +194,7 @@ class RowParallelSampler(SamplerEngine):
         cfg_scale: float = 3.0,
         seed: int = None,
         use_cache: bool = True,
-        ar_rows: int = 48,
+        ar_rows: int = 1,
         parallel_as_draft: bool = False,
         **kwargs
     ):
