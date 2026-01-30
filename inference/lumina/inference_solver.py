@@ -301,7 +301,7 @@ class FlexARInferenceSolver:
         self, 
         model_path, vae_tokenizer_path, 
         precision, target_size=512, device="cpu",
-        row_parallel=False, lora_path=None, 
+        row_parallel=False, lora_path=None, block_size=None, 
     ):
         self.dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         self.device = device
@@ -332,10 +332,10 @@ class FlexARInferenceSolver:
                 # self.model,
                 lora_model,
                 self.item_processor.tokenizer,
-                
                 image_start_token=self.item_processor.token2id(self.item_processor.image_start_token),
                 image_end_token=self.item_processor.token2id(self.item_processor.image_end_token),
-                image_end_line_token=self.item_processor.token2id(self.item_processor.new_line_token)
+                image_end_line_token=self.item_processor.token2id(self.item_processor.new_line_token),
+                block_size=block_size,
             )
         else:
             self.sampler = SamplerEngine(self.model, self.item_processor.tokenizer)
@@ -353,6 +353,8 @@ class FlexARInferenceSolver:
         cfg_guidance_scale=None,
         logits_processor=None,
         seed: int = None,
+        block_size:int = None,
+        draft_use_causal_mask: bool = False,
         **kwargs
     ):
 
@@ -395,6 +397,8 @@ class FlexARInferenceSolver:
                 do_cfg=True,
                 cfg_scale=cfg_guidance_scale,
                 seed=seed,
+                block_size=block_size,
+                draft_use_bi_mask=not draft_use_causal_mask, # stupid implementation
             )
         image_tokens = token_sequence[0][prompt_len:-1].tolist()
     

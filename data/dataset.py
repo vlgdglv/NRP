@@ -12,11 +12,19 @@ logger = get_logger(__name__)
 
 
 class TokenDataset(Dataset):
-    def __init__(self, data_dir, file_ext=".pt"):
+    def __init__(
+        self, 
+        data_dir, 
+        file_ext=".pt",
+        start_idx=-1,
+        end_idx=-1,
+    ):
         super().__init__()
         self.samples = []
         files = sorted(glob.glob(os.path.join(data_dir, f"*{file_ext}")))
-
+        if start_idx != -1 and end_idx != -1:
+            files = files[start_idx:end_idx]
+            
         iterator = tqdm(files) if is_rank0() else files
 
         for f_path in iterator:
@@ -100,7 +108,6 @@ class ImageRowCollator:
         causal_mask = torch.tril(torch.ones((L, L), dtype=torch.bool, device=device))
         final_mask_bool = causal_mask.unsqueeze(0).expand(B, L, L).clone() # (B, L, L)
         
-        
         for i in range(B):
             seq = input_ids[i]
             
@@ -133,11 +140,18 @@ class ImageRowCollator:
                     n = min(src_idx.numel(), tgt_idx.numel())
                     src_idx, tgt_idx = src_idx[:n], tgt_idx[:n]
                     labels[i, src_idx] = input_ids[i, tgt_idx]
-                    
+
+                # deal with eol
+                if r == self.H-1: continue
+                if self.num_blocks == 1:
+                    labels[i, row_base + self.W - 1] = self.eol_token_id
+                else:
+                    labels[i, row_base + self.W - 1] = input_ids[i, row_base + self.W]
+                
             labels[i, seq == self.pad_token_id] = self.invalid_label
             labels[i, seq == self.eos_token_id] = self.invalid_label
             labels[i, :img_tokens_begin] = self.invalid_label
-            
+
             if self.use_standard_causal:
                 pass
             else:
@@ -178,7 +192,7 @@ class ImageRowCollator:
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": attention_mask
-        } 
+        }
 
 def check_image(batch, W=49, H=48):
     img_length = W * H
@@ -193,7 +207,7 @@ def check_image(batch, W=49, H=48):
             assert token_ids[idx+W] == 8803 # 
 
 
-def create_dataloader(data_dir, batch_size=32, image_width=49, image_height=48, block_size=24):
+def create_dataloader(data_dir, batch_size=32, image_width=49, image_height=48, block_size=48):
     dataset = TokenDataset(data_dir)
 
     collator = ImageRowCollator(

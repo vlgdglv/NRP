@@ -1,4 +1,6 @@
 # Use vllm environment
+import multiprocessing as mp
+mp.set_start_method("spawn", force=True)
 
 import argparse
 import json
@@ -110,7 +112,7 @@ if __name__ == "__main__":
     sample_text = "A black Honda motorcycle parked in front of a garage."
     template_condition_sentences = f"Generate an image of {target_size_w}x{target_size_h} according to the following prompt:\n"
 
-    token_ids = build_prompt_token_ids(item_processor, sample_text, template_condition_sentences)
+    token_ids = build_prompt_token_ids(item_processor, template_condition_sentences, sample_text)
     print(token_ids)
     tokenizer = llm.get_tokenizer()
     
@@ -119,7 +121,7 @@ if __name__ == "__main__":
 
     t1 = time.time()
     for _ in range(2):
-        outs = llm.generate(prompt, sampling_params)
+        outs = llm.generate(prompt, sampling_params,  use_tqdm=False)
     t2 = time.time()
     print("Time:", t2 - t1)
     print(outs[0])

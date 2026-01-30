@@ -180,6 +180,7 @@ class RowParallelSampler(SamplerEngine):
         self.image_end_token = image_end_token
         self.image_end_line_token = image_end_line_token
         self.inner_cnt = 0
+        self.image_end_line_token_tensor = torch.tensor([self.image_end_line_token,], dtype=torch.long, device=model.device).unsqueeze(0)
 
     def sample(
         self,
@@ -196,6 +197,8 @@ class RowParallelSampler(SamplerEngine):
         use_cache: bool = True,
         ar_rows: int = 1,
         parallel_as_draft: bool = False,
+        draft_use_bi_mask: bool = True,
+        block_size: int = 48,
         **kwargs
     ):
         is_prefill = True
@@ -254,13 +257,23 @@ class RowParallelSampler(SamplerEngine):
                 attention_mask = torch.cat([attention_mask, ones], dim=-1)
 
                 is_prefill = False if is_prefill else False
-
                 img_pos_info = self._get_decoding_position(token_sequence)
 
                 if img_pos_info["is_in_image"]:
                     if img_pos_info["is_end_of_line"] and img_pos_info["num_of_lines"] >= ar_rows:
                         ar_row_done = True
                         break
+
+            # fill kv cache for eol token 
+            outputs = self.model(
+                input_ids=input_ids, # EOL
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True
+            )
+            past_key_values = outputs.past_key_values
+            # print("[Length check] token_sequence: ", token_sequence.shape, "KV cache length:", past_key_values[0][0].shape, "attention_mask: ", attention_mask.shape)
 
         assert self.img_h is not None and self.img_w is not None
         remain_rows = self.img_h - ar_rows
@@ -275,77 +288,93 @@ class RowParallelSampler(SamplerEngine):
             }, f"testing_fields/data_runtime/{RT_SAVE_NAME}/sample_{self.inner_cnt}.pt")
             logger.info(f"Full ar states saved at sample_{self.inner_cnt}.pt., tokens: {generated_tokens.shape}, hidden_states: {generated_hidden_states.shape}")
 
-        input_ids = token_sequence[:, -(self.img_w+1):]
 
-        # self.model.enable_adapter()
+        assert self.img_w % block_size == 0, f"Image width {self.img_w} is not divisible by block_size"
+        num_blocks_per_row = self.img_w // block_size
+
         for rows in range(remain_rows):
-            input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
-            ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
-            attention_mask = torch.cat([attention_mask, ones], dim=-1)
-            mask4d = self._build_row_bidirectional_mask(attention_mask, input_ids.shape[-1])
-            row_output = self.model(
-                input_ids=input_ids,
-                past_key_values=past_key_values,
-                # attention_mask=attention_mask,
-                attention_mask=mask4d,
-                use_cache=True,
-                return_dict=True,
-            )
-            row_logits = row_output.logits
-            if not parallel_as_draft:
-                generated_hidden_states.append(row_logits)
-                
-            past_key_values = row_output.past_key_values
-            if do_cfg:
-                cond, uncond = row_logits.chunk(2, dim=0)
-                row_logits = uncond + cfg_scale * (cond - uncond)
-            scores = logits_processor(token_sequence, row_logits)
-            
-            if do_sample:
-                probs = torch.nn.functional.softmax(scores / temperature, dim=-1)
-                next_row_token = torch.multinomial(
-                    probs.view(-1, probs.shape[-1]),
-                    num_samples=1,
-                    generator=self.generator,
-                ).view(1, -1)
-            else:
-                next_row_token = torch.argmax(scores, dim=-1, keepdim=True)
-            if not parallel_as_draft:
-                generated_tokens.append(next_row_token)
-                
-            if parallel_as_draft:
-                rollback_kv_cache(past_key_values, input_ids.shape[-1])
-                input_ids = next_row_token 
-                input_ids = torch.roll(input_ids, shifts=1, dims=0)
-                input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
-                with self.model.disable_adapter():
-                    # print(input_ids.shape, attention_mask.shape)
-                    next_row_token, outputs = self._forward_and_sample(
-                        input_ids,
-                        attention_mask,
-                        past_key_values,
-                        temperature,
-                        logits_processor,
-                        token_sequence,
-                        do_sample,
-                        do_cfg,
-                        cfg_scale,
-                        is_prefill=False,
-                        is_multi_token=True
-                    )
-                    past_key_values = outputs.past_key_values
-                    generated_hidden_states.append(outputs.logits)
-                    
-                    token_sequence = torch.cat([token_sequence, next_row_token], dim=-1)
-                    input_ids = next_row_token
-            else:
-                token_sequence = torch.cat([token_sequence, next_row_token], dim=-1)
-                input_ids = next_row_token
+            input_ids = token_sequence[:, -(block_size+1):-1] # with eol token
 
+            for blocks in range(num_blocks_per_row):
+                # print(input_ids.shape)
+                if blocks == num_blocks_per_row - 1:
+                    # append eol token cause it is last block
+                    input_ids = torch.cat([input_ids, self.image_end_line_token_tensor], dim=-1)
+                input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
+                ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
+                attention_mask = torch.cat([attention_mask, ones], dim=-1)
+
+                if draft_use_bi_mask:
+                    mask4d = self._build_row_bidirectional_mask(attention_mask, input_ids.shape[-1])
+                else:
+                    logger.warning_once(
+                        "Using causal mask in drafting."
+                    )
+                blk_output = self.model(
+                    input_ids=input_ids,
+                    past_key_values=past_key_values,
+                    attention_mask=mask4d if draft_use_bi_mask else attention_mask,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                blk_logits = blk_output.logits
+                if not parallel_as_draft:
+                    generated_hidden_states.append(blk_logits)
+                    
+                past_key_values = blk_output.past_key_values
+                if do_cfg:
+                    cond, uncond = blk_logits.chunk(2, dim=0)
+                    blk_logits = uncond + cfg_scale * (cond - uncond)
+                scores = logits_processor(token_sequence, blk_logits)
+                
+                if do_sample:
+                    probs = torch.nn.functional.softmax(scores / temperature, dim=-1)
+                    next_blk_token = torch.multinomial(
+                        probs.view(-1, probs.shape[-1]),
+                        num_samples=1,
+                        generator=self.generator,
+                    ).view(1, -1)
+                else:
+                    next_blk_token = torch.argmax(scores, dim=-1, keepdim=True)
+
+                if not parallel_as_draft:
+                    generated_tokens.append(next_blk_token)
+                    
+                if parallel_as_draft:
+                    rollback_kv_cache(past_key_values, input_ids.shape[-1])
+                    input_ids = next_blk_token 
+                    input_ids = torch.roll(input_ids, shifts=1, dims=0)
+                    input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
+                    with self.model.disable_adapter():
+                        next_blk_token, outputs = self._forward_and_sample(
+                            input_ids,
+                            attention_mask,
+                            past_key_values,
+                            temperature,
+                            logits_processor,
+                            token_sequence,
+                            do_sample,
+                            do_cfg,
+                            cfg_scale,
+                            is_prefill=False,
+                            is_multi_token=True
+                        )
+                        past_key_values = outputs.past_key_values
+                        generated_hidden_states.append(outputs.logits)
+                        
+                        token_sequence = torch.cat([token_sequence, next_blk_token], dim=-1)
+                        input_ids = next_blk_token
+                else:
+                    token_sequence = torch.cat([token_sequence, next_blk_token], dim=-1)
+                    input_ids = next_blk_token
+        
+
+        # Ending: ensure sample is finished
         input_ids = token_sequence[:, -1]
         input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
-        
-        # Ensure sample is finished
+        ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
+        attention_mask = torch.cat([attention_mask, ones], dim=-1)
+
         with self.model.disable_adapter():
             while True:
                 next_token, outputs = self._forward_and_sample(

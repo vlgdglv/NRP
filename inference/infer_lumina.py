@@ -11,9 +11,10 @@ from datetime import datetime
 import random
 import numpy as np
 
-
+from utils.logger import get_logger
 from inference.lumina.inference_solver import FlexARInferenceSolver
 
+logger = get_logger(__name__)
 
 def set_seed(seed: int):
     """
@@ -74,9 +75,13 @@ if __name__ == "__main__":
     parser.add_argument("--seeds", type=int, nargs="+", default=[42])
     parser.add_argument("--image_top_k", type=int, default=2000)
     parser.add_argument("--text_top_k", type=int, default=10)
+    parser.add_argument("--block_size", type=int, default=48)
     parser.add_argument("--cfg_guidance_scale", type=float, default=3.0)
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--row_parallel", action="store_true")
+    parser.add_argument("--do_warmup", type=int, default=1)
+    parser.add_argument("--infer_count", type=int, default=-1, help="number of inference")
+    parser.add_argument("--draft_use_causal_mask", action="store_true")
     args = parser.parse_args()
     
     model_path = args.model_path
@@ -117,10 +122,13 @@ if __name__ == "__main__":
     os.makedirs(save_dir, exist_ok=True)
 
     image_logits_processor = inference_solver.create_logits_processor(cfg=cfg_guidance_scale, image_top_k=image_top_k)
-
+    time_collector = []
+    logger.info("start inference ...")
     for seed in seeds:
         inference_solver.model.seed = seed
         for i, q_image_content_condition in enumerate(image_content_prompts):
+            if args.infer_count > 0 and i >= args.infer_count:
+                break
         
             prompt_text = template_condition_sentences + q_image_content_condition
         
@@ -139,21 +147,34 @@ if __name__ == "__main__":
                     temperature=1.0,
                     cfg_guidance_scale=cfg_guidance_scale,
                     logits_processor=image_logits_processor,
-                    seed=seed   
+                    seed=seed,
+                    block_size=args.block_size,
+                    draft_use_causal_mask=args.draft_use_causal_mask
                 )
             t2.record()
             torch.cuda.synchronize()
 
             t = t1.elapsed_time(t2) / 1000
             time_end = time.time()
-            print("Token generation time elapsed: ", t, time_end - time_start)
+            time_uesd = time_end - time_start
+            time_collector.append(time_uesd)
+            logger.info(f"Image {i} generation time elapsed: {t:.2f} s (other timers: {time_uesd:.2f} s)")
 
             a1, new_image = generated[0], generated[1][0]
             result_image = inference_solver.create_image_grid([new_image], 1, 1)
             
-            collected_images.append(np.array(result_image))
-            result_image.save(os.path.join(save_dir, output_file_name))
-            print(a1, 'saved', output_file_name) # <|image|>
+            if args.infer_count > 0:
+                collected_images.append(np.array(result_image))
+            else:
+                result_image.save(os.path.join(save_dir, output_file_name))
+                logger.info(a1, 'saved', output_file_name) # <|image|>
+    
+    if args.infer_count > 0 and len(collected_images) > 0:
+        row_image = np.concatenate(collected_images, axis=1)
+        output_file_name = 'img_' + str(args.infer_count) + "samples" +'_seed' + str(seed) + ".png"
+        PIL.Image.fromarray(row_image).save(os.path.join(save_dir, output_file_name))
+        logger.info(f"Saved {len(collected_images)} samples to {output_file_name} to {save_dir}")
 
+    logger.info(f"Average time: {(sum(time_collector) / len(time_collector)):.2f} seconds")
     del inference_solver
     gc.collect()
