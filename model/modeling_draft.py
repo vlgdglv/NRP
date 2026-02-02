@@ -21,24 +21,14 @@ class RowExpertModel(nn.Module):
         self.kd_weight = kd_weight
         self.kd_temp = kd_temp
         
-    def forward(self, input_ids, attention_mask, labels=None):
-        
-        teacher_logits = None
-        if self.use_kd:
-            was_training = self.base_model.training
-            self.base_model.eval()
-            with self.base_model.disable_adapter():
-                with torch.no_grad():
-                    teacher_outputs = self.base_model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        use_cache=False,
-                        output_hidden_states=False,
-                    )
-                    teacher_logits = teacher_outputs.logits
-            if was_training:
-                self.base_model.train()
-            
+    def forward(
+        self, 
+        input_ids, 
+        attention_mask, 
+        labels=None, 
+        teacher_token=None, 
+        teacher_logits=None
+    ):    
         outputs = self.base_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -52,6 +42,8 @@ class RowExpertModel(nn.Module):
         output_dict["logits"] = logits
         
         if labels is not None:
+            
+                
             if self.use_ce:
                 shift_logits = logits.view(-1, logits.shape[-1])
                 shift_labels = labels.view(-1)
@@ -61,28 +53,30 @@ class RowExpertModel(nn.Module):
                 loss = loss + self.ce_weight * ce_loss
                 output_dict["ce_loss"] = ce_loss.item()
             
-            if self.use_kd and teacher_logits is not None:
+            # sparse kd
+            if self.use_kd:
+                assert teacher_token is not None and teacher_logits is not None
                 invalid = -100
-                valid_mask = (labels != invalid)
-
-                student_logits = logits[valid_mask]
-                teacher_logits = teacher_logits[valid_mask]
-                # V = self.config.vocab_size
-                # allowed = torch.zeros(V, device=teacher_logits.device, dtype=torch.bool)
-                # allowed[:8198] = True
-                # neg_inf = torch.finfo(teacher_logits.dtype).min
-                # vocab_mask = torch.where(allowed, torch.zeros((), device=teacher_logits.device, dtype=teacher_logits.dtype), neg_inf)
-                # student_logits = student_logits + vocab_mask
-                # teacher_logits = teacher_logits + vocab_mask
+                valid_mask = (labels != invalid).view(-1) 
+                s_logits_v = logits.view(-1, logits.size(-1))[valid_mask]
+                t_indices_v = teacher_token.view(-1, teacher_token.size(-1))[valid_mask].long()
+                t_values_v = teacher_logits.view(-1, teacher_logits.size(-1))[valid_mask]
+                
+                student_topk_logits = torch.gather(s_logits_v, dim=-1, index=t_indices_v)
 
                 T = float(self.kd_temp)
+                log_p_student = F.log_softmax(student_topk_logits / T, dim=-1)
+                p_teacher = F.softmax(t_values_v / T, dim=-1)
+
+                
                 kd_loss = F.kl_div(
-                    F.log_softmax(student_logits / T, dim=-1),
-                    F.softmax(teacher_logits / T, dim=-1),
+                    log_p_student,
+                    p_teacher,
                     reduction="batchmean",
                 ) * (T * T)
                 output_dict["kd_loss"] = kd_loss.item()
                 
                 loss = loss + self.kd_weight * kd_loss
+            # print("kd_loss: ", kd_loss.item(), "ce_loss: ", ce_loss.item())
         output_dict["loss"] = loss
         return output_dict

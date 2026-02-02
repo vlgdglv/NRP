@@ -55,12 +55,20 @@ def train(args):
     model.base_model.gradient_checkpointing_enable()
     model.base_model.enable_input_require_grads()
 
-    train_dataset = TokenDataset(data_path)
+    train_dataset = TokenDataset(
+        data_path, 
+        use_teacher=args.use_teacher, 
+        teacher_data_dir=args.teacher_data_dir,
+        # temperary setting for ensuring fair comparison
+        start_idx=0,
+        end_idx=10000,
+    )
     collator = ImageRowCollator(
         image_width=image_width, 
         image_height=image_height, 
         use_standard_causal=use_standard_causal, 
-        block_size=args.block_size
+        block_size=args.block_size,
+        use_teacher=args.use_teacher
     )
     
     training_args = TrainingArguments(
@@ -100,6 +108,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Lumina-mGPT-7B-768")
     parser.add_argument("--data_path", type=str, default="/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train")
+    parser.add_argument("--teacher_data_dir", type=str, default="/home/ffc3/bht/NRP/datasets/COCO_Lumina7B_training")
     parser.add_argument("--output_dir", type=str, default="training_outputs/lumina")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--block_size", type=int, default=48)
@@ -107,7 +116,7 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--save_strategy", type=str, default="steps") # "no", "epoch", "steps"
-    parser.add_argument("--save_steps", type=int, default=1000)
+    parser.add_argument("--save_steps", type=int, default=2500)
     parser.add_argument("--image_width", type=int, default=49) # include end-of-line token
     parser.add_argument("--image_height", type=int, default=48)
     parser.add_argument("--lora_rank", type=int, default=64)
@@ -116,6 +125,7 @@ if __name__ == "__main__":
     parser.add_argument("--ce_weight", type=float, default=1.0)
     parser.add_argument("--kd_weight", type=float, default=1.0)
     parser.add_argument("--kd_temp", type=float, default=1.0)
+    parser.add_argument("--use_teacher", action="store_true")
     parser.add_argument("--use_standard_causal", action="store_true")
     parser.add_argument("--enable_wandb", action="store_true")
     parser.add_argument("--run_name", type=str, default=None)

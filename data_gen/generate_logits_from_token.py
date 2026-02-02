@@ -13,9 +13,6 @@ from model.lumina_arch.chameleon import ChameleonForConditionalGeneration
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# def is_rank0():
-#     return True # 单机脚本默认 True，如果是多卡 DDP 需要自行修改
-
 
 def run_offline_inference(
     teacher_model,
@@ -30,7 +27,7 @@ def run_offline_inference(
 ):
     os.makedirs(save_dir, exist_ok=True)
 
-    dataset = TokenDataset(data_dir=data_dir, file_ext=".pt")
+    dataset = TokenDataset(data_dir=data_dir, file_ext=".pt", start_idx=start_idx, end_idx=end_idx)
 
     collator = ImageRowCollator(
         image_width=image_width,
@@ -43,7 +40,7 @@ def run_offline_inference(
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collator,
-        num_workers=4,
+        num_workers=1,
         pin_memory=True
     )
 
@@ -71,16 +68,15 @@ def run_offline_inference(
             B = input_ids.shape[0]
             
             topk_values_cpu = topk_values.detach().cpu().to(torch.float16)
-            topk_indices_cpu = topk_indices.detach().cpu().to(torch.int32)
-
+            topk_indices_cpu = topk_indices.detach().cpu().to(torch.int16)
             for i in range(B):
-                token_fname = f"token_{global_sample_idx}_top{top_k}.pt"
-                logits_fname = f"logits_{global_sample_idx}_top{top_k}s.pt"
-                
-                torch.save(topk_indices_cpu[i], os.path.join(save_dir, token_fname))
-                torch.save(topk_indices_cpu[i], os.path.join(save_dir, logits_fname))
+                end_pos = (input_ids[i] == collator.eos_token_id).nonzero(as_tuple=False)
+                end_pos = int(end_pos[-1][0].item()) + 1
+                # print("sample_idx", global_sample_idx, "end_pos", end_pos)
+                save_fname = f"teacher_token_logits_{global_sample_idx}_top{top_k}.pt"
+                torch.save((topk_indices_cpu[i][:end_pos, :], topk_values_cpu[i][:end_pos, :]), os.path.join(save_dir, save_fname))
                 global_sample_idx += 1
-            # return 
+
     logger.info(f"Done! Saved {global_sample_idx} pairs of files to {save_dir}.")
 
 

@@ -18,23 +18,31 @@ class TokenDataset(Dataset):
         file_ext=".pt",
         start_idx=-1,
         end_idx=-1,
+        use_teacher=False,
+        teacher_data_dir=None,
+        teacher_file_name="teacher_token_logits_{}_top16.pt"
     ):
         super().__init__()
         self.samples = []
-        files = sorted(glob.glob(os.path.join(data_dir, f"*{file_ext}")))
+        files = sorted(glob.glob(os.path.join(data_dir, f"*{file_ext}")), key=lambda x: int(os.path.basename(x).split("_")[-1].split(".")[0]))
         if start_idx != -1 and end_idx != -1:
             files = files[start_idx:end_idx]
-            
+        self.use_teacher = use_teacher
+        if use_teacher:
+            self.teacher_samples = []
+        
         iterator = tqdm(files) if is_rank0() else files
-
         for f_path in iterator:
             try:
                 payload =  torch.load(f_path, map_location="cpu", weights_only=True)
                 token_seq = payload["tokens"]
-
                 if not isinstance(token_seq, torch.Tensor):
                     token_seq = torch.tensor(token_seq, dtype=torch.int32)
-
+                if use_teacher and teacher_data_dir and teacher_file_name:
+                    sample_idx = f_path.split("/")[-1].split(".")[0].split("_")[-1] # "hs_sample_1004.pt"
+                    # print(f_path, " sample_idx", sample_idx)
+                    teacher_token, teacher_logits = torch.load(os.path.join(teacher_data_dir, teacher_file_name.format(sample_idx)), map_location="cpu", weights_only=True)
+                    self.teacher_samples.append((teacher_token, teacher_logits))
                 self.samples.append(token_seq)
             except Exception as e:
                 logger.error(f"Failed to load {f_path}: {e}")
@@ -47,7 +55,16 @@ class TokenDataset(Dataset):
         return len(self.samples)
     
     def __getitem__(self, idx):
-        return {"input_ids": self.samples[idx]}
+        if self.use_teacher:
+            return {
+                "input_ids": self.samples[idx], 
+                "teacher_token": self.teacher_samples[idx][0], 
+                "teacher_logits": self.teacher_samples[idx][1]
+            }
+        else:
+            return {
+                "input_ids": self.samples[idx], 
+            }
     
 """
     Image Token Sequence:
@@ -70,11 +87,13 @@ class ImageRowCollator:
         pad_token_id: int = 0,
         use_standard_causal: bool = False,
         block_size: int = 48,
+        use_teacher: bool = False
     ):
         self.W = image_width
         self.H = image_height
         self.pad_token_id = pad_token_id
         self.image_len = self.W * self.H
+        self.use_teacher = use_teacher
         
         self.block_size = block_size
         self.img_W = self.W - 1
@@ -92,13 +111,29 @@ class ImageRowCollator:
         self.boi_token_id = 8197
         self.eol_token_id = 8803
         self.eos_token_id = 8710
-        
 
     def __call__(self, batch):
         # batch: List[Dict[str, torch.Tensor]]
         check_image(batch, self.W, self.H)
         token_ids = [sample["input_ids"] for sample in batch]
-
+        if self.use_teacher:
+            # check length
+            teacher_token = [sample["teacher_token"] for sample in batch]
+            teacher_logits = [sample["teacher_logits"]for sample in batch]  
+            
+            for input_ids, teacher_token, teacher_logits in zip(token_ids, teacher_token, teacher_logits):
+                assert input_ids.shape[0] == teacher_token.shape[0] == teacher_logits.shape[0]
+            teacher_token = pad_sequence(
+                teacher_token,
+                batch_first=True,
+                padding_value=self.pad_token_id
+            ) 
+            teacher_logits = pad_sequence(
+                teacher_logits,
+                batch_first=True,
+                padding_value=0.0
+            ) 
+            
         input_ids = pad_sequence(token_ids, batch_first=True, padding_value=self.pad_token_id)
         
         B, L = input_ids.shape
@@ -187,12 +222,20 @@ class ImageRowCollator:
         attention_mask.masked_fill_(attention_mask_bool, 0.0)
         attention_mask = attention_mask.contiguous()
     
-
-        return {
-            "input_ids": input_ids,
-            "labels": labels,
-            "attention_mask": attention_mask
-        }
+        if self.use_teacher:
+            return {
+                "input_ids": input_ids,
+                "labels": labels,
+                "attention_mask": attention_mask,
+                "teacher_token": teacher_token,
+                "teacher_logits": teacher_logits,
+            }
+        else:
+            return {
+                "input_ids": input_ids,
+                "labels": labels,
+                "attention_mask": attention_mask
+            }
 
 def check_image(batch, W=49, H=48):
     img_length = W * H
@@ -207,13 +250,17 @@ def check_image(batch, W=49, H=48):
             assert token_ids[idx+W] == 8803 # 
 
 
-def create_dataloader(data_dir, batch_size=32, image_width=49, image_height=48, block_size=48):
-    dataset = TokenDataset(data_dir)
+def create_dataloader(
+    data_dir, batch_size=32, image_width=49, image_height=48, block_size=48,
+    use_teacher=False, teacher_data_dir="/home/ffc3/bht/NRP/datasets/COCO_Lumina7B_training",
+):
+    dataset = TokenDataset(data_dir, use_teacher=use_teacher, teacher_data_dir=teacher_data_dir)
 
     collator = ImageRowCollator(
         image_width=image_width,
         image_height=image_height,
         block_size=block_size,
+        use_teacher=use_teacher
     )
 
     num_workers = min(os.cpu_count(), 8)
@@ -249,7 +296,8 @@ if __name__ == "__main__":
     COCO17_path = "/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train"
     B, N, NB = 32, 1, True
     cnt = 0
-    loader = create_dataloader(COCO17_path, batch_size=B)
+    use_teacher = True
+    loader = create_dataloader(COCO17_path, batch_size=B, use_teacher=use_teacher)
     Lmax = 0
 
     t0 = time.time()
@@ -257,6 +305,11 @@ if __name__ == "__main__":
         inputs = batch["input_ids"].cuda(non_blocking=NB)
         mask = batch["attention_mask"].cuda(non_blocking=NB)
         labels = batch["labels"].cuda(non_blocking=NB)
+        if use_teacher:
+            teacher_token = batch["teacher_token"]
+            teacher_logits = batch["teacher_logits"]
+            print("inputs.shape", inputs.shape, "mask.shape", mask.shape, "labels.shape", labels.shape)
+            print("teacher_token.shape", teacher_token.shape, "teacher_logits.shape", teacher_logits.shape)
         base_tensor_bytes += tensor_bytes(inputs)
         base_tensor_bytes += tensor_bytes(mask)
         base_tensor_bytes += tensor_bytes(labels)

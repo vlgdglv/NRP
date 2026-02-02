@@ -8,6 +8,4 @@ CUDA_VISIBLE_DEVICES=7 python inference/infer_lumina.py \
     --lora_path training_outputs/lumina/$test_lora_name \
     --save_name $save_name \
     --block_size $block_size \
-    --infer_count $infer_count 
-    # \
-    # --draft_use_causal_mask
+    --infer_count $infer_count # --draft_use_causal_mask

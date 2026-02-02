@@ -195,7 +195,7 @@ class RowParallelSampler(SamplerEngine):
         cfg_scale: float = 3.0,
         seed: int = None,
         use_cache: bool = True,
-        ar_rows: int = 1,
+        ar_rows: int = 12,
         parallel_as_draft: bool = False,
         draft_use_bi_mask: bool = True,
         block_size: int = 48,
