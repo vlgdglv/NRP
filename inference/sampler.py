@@ -42,12 +42,14 @@ class SamplerEngine:
         self,
         input_ids: torch.LongTensor,
         logits_processor: LogitsProcessorList,
+        attention_mask: torch.LongTensor = None,
         temperature: float = 1.0,
         max_length: int = 4096,
         eos_token_id: int = 8710,
         do_sample: bool = True,
         sample_mode: str = "baseline",
         do_cfg: bool = True,
+        is_uncond_provided: bool = False,
         cfg_scale: float = 3.0,
         seed: int = None,
         use_cache: bool = True,
@@ -60,24 +62,35 @@ class SamplerEngine:
         if seed is not None:
             set_seed(seed)
             self.generator = torch.Generator(device).manual_seed(seed)
+        else:
+            self.generator = None
 
         # Preparse everything
         input_ids = input_ids.contiguous()
-        token_sequence = input_ids
+        if is_uncond_provided:
+            token_sequence = input_ids[0, :].unsqueeze(0)
+        else:
+            token_sequence = input_ids
 
         # Use dynamic cache as default
         past_key_values = DynamicCache() if use_cache else None
         # past_key_values = None
         
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
         if attention_mask.dim() == 2:
             attention_mask = attention_mask.unsqueeze(1)
 
         # Prepare cfgs
         if do_cfg:
-            input_ids = input_ids.repeat(2, 1)
-            attention_mask = attention_mask.repeat(2, 1, 1)
-            attention_mask[1::2, :, :prefill_length - 1] = 0
+            if is_uncond_provided:
+                pass
+            else:
+                input_ids = input_ids.repeat(2, 1)
+                attention_mask = attention_mask.repeat(2, 1, 1)
+                attention_mask[1::2, :, :prefill_length - 1] = 0
+            
+        generated_token_count = 0
 
         while True:
             next_token, outputs = self._forward_and_sample(
@@ -101,9 +114,10 @@ class SamplerEngine:
             ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
             attention_mask = torch.cat([attention_mask, ones], dim=-1)
 
+            generated_token_count += next_token.shape[-1]
             is_prefill = False if is_prefill else False
             
-            if (next_token.item() == eos_token_id) or (token_sequence.shape[-1] == max_length):
+            if (next_token.item() == eos_token_id) or (generated_token_count == max_length):
                 break
 
         return token_sequence
@@ -226,7 +240,7 @@ class RowParallelSampler(SamplerEngine):
         if do_cfg:
             input_ids = input_ids.repeat(2, 1)
             attention_mask = attention_mask.repeat(2, 1, 1)
-            attention_mask[1::2, :, :prefill_length - 1] = 0
+            attention_mask[1::2, :prefill_length - 1] = 0
 
         ar_row_done = False
         generated_hidden_states, generated_tokens = [], []

@@ -1,6 +1,5 @@
+import os, sys
 import argparse
-import os
-import sys
 import gc
 from PIL import Image
 import PIL.Image
