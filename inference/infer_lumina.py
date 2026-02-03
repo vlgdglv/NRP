@@ -166,7 +166,7 @@ if __name__ == "__main__":
                 collected_images.append(np.array(result_image))
             else:
                 result_image.save(os.path.join(save_dir, output_file_name))
-                logger.info(a1, 'saved', output_file_name) # <|image|>
+                logger.info(f"Saved at {output_file_name}") # <|image|>
     
     if args.infer_count > 0 and len(collected_images) > 0:
         row_image = np.concatenate(collected_images, axis=1)

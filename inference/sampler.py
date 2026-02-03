@@ -68,7 +68,8 @@ class SamplerEngine:
         # Preparse everything
         input_ids = input_ids.contiguous()
         if is_uncond_provided:
-            token_sequence = input_ids[0, :].unsqueeze(0)
+            mask = attention_mask[0].bool()
+            token_sequence = input_ids[0, mask].unsqueeze(0)
         else:
             token_sequence = input_ids
 
@@ -78,19 +79,21 @@ class SamplerEngine:
         
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
-        if attention_mask.dim() == 2:
-            attention_mask = attention_mask.unsqueeze(1)
+        # if attention_mask.dim() == 2:
+        #     attention_mask = attention_mask.unsqueeze(1)
 
         # Prepare cfgs
         if do_cfg:
             if is_uncond_provided:
+                # assert "position_ids" in kwargs, "need to provide position_ids for uncond and cond"
                 pass
             else:
                 input_ids = input_ids.repeat(2, 1)
-                attention_mask = attention_mask.repeat(2, 1, 1)
-                attention_mask[1::2, :, :prefill_length - 1] = 0
+                attention_mask = attention_mask.repeat(2, 1)
+                attention_mask[1::2,  :prefill_length - 1] = 0
             
         generated_token_count = 0
+        real_lens = kwargs["real_lens"] if "real_lens" in kwargs else None
 
         while True:
             next_token, outputs = self._forward_and_sample(
@@ -103,7 +106,8 @@ class SamplerEngine:
                 do_sample,
                 do_cfg,
                 cfg_scale,
-                is_prefill
+                is_prefill,
+                **kwargs
             )
             past_key_values = outputs.past_key_values
 
@@ -111,12 +115,19 @@ class SamplerEngine:
             
             input_ids = next_token.repeat(2, 1) if do_cfg else next_token
             
-            ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
+            ones = torch.ones(input_ids.shape[0], input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
+            # ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
             attention_mask = torch.cat([attention_mask, ones], dim=-1)
 
             generated_token_count += next_token.shape[-1]
             is_prefill = False if is_prefill else False
             
+            if real_lens is not None:
+                real_lens += next_token.shape[-1]
+                position_ids = real_lens.view(real_lens.shape[0], 1) - 1            
+                if "position_ids" in kwargs:
+                    kwargs["position_ids"] = position_ids
+
             if (next_token.item() == eos_token_id) or (generated_token_count == max_length):
                 break
 
@@ -134,7 +145,8 @@ class SamplerEngine:
         do_cfg: bool = True,
         cfg_scale: float = 3.0,
         is_prefill: bool = True,
-        is_multi_token: bool = False
+        is_multi_token: bool = False,
+        **kwargs
     ):
         outputs = self.model(
             input_ids=input_ids,
