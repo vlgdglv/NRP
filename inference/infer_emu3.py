@@ -111,7 +111,7 @@ if __name__ == "__main__":
         emu_model_path,
         device_map=device,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2" if not args.batched_cfg else "eager",
+        attn_implementation="eager", #"flash_attention_2" if not args.batched_cfg else "eager",
         trust_remote_code=True,
     )
     model.eval()
@@ -120,7 +120,7 @@ if __name__ == "__main__":
     image_tokenizer = AutoModel.from_pretrained(emu_vq_model_path, device_map=device, torch_dtype=torch.bfloat16, trust_remote_code=True).eval()
     processor = Emu3Processor(image_processor, image_tokenizer, tokenizer)
 
-    image_area = model.config.image_area
+    image_area = args.image_area
     generation_config = GenerationConfig(
         use_cache=True,
         eos_token_id=model.config.eos_token_id,

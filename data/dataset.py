@@ -8,6 +8,8 @@ from tqdm import tqdm
 from utils.logger import get_logger
 from utils import is_rank0
 
+from typing import Callable
+
 logger = get_logger(__name__)
 
 
@@ -38,6 +40,8 @@ class TokenDataset(Dataset):
                 token_seq = payload["tokens"]
                 if not isinstance(token_seq, torch.Tensor):
                     token_seq = torch.tensor(token_seq, dtype=torch.int32)
+                if token_seq.shape[0] == 1:
+                    token_seq = token_seq.squeeze(0)
                 if use_teacher and teacher_data_dir and teacher_file_name:
                     sample_idx = f_path.split("/")[-1].split(".")[0].split("_")[-1] # "hs_sample_1004.pt"
                     # print(f_path, " sample_idx", sample_idx)
@@ -67,7 +71,7 @@ class TokenDataset(Dataset):
             }
     
 """
-    Image Token Sequence:
+    Lumina Image Token Sequence:
 
     | ---------- Prompt token ------ | --Image Ctrl--| -- Image token -- |----Ending----|
     | 0 ------------------ <imgspan> | <boi><sz><sz> | {-{W}-<eol>} x {H}|<eoi><imgspan>|
@@ -87,7 +91,13 @@ class ImageRowCollator:
         pad_token_id: int = 0,
         use_standard_causal: bool = False,
         block_size: int = 48,
-        use_teacher: bool = False
+        use_teacher: bool = False,
+        eoi_token_id: int = 8196,
+        boi_token_id: int = 8197,
+        eol_token_id: int = 8803,
+        eos_token_id: int = 8710,
+        img_token_id: int = -1,
+        token_check_func: Callable = None
     ):
         self.W = image_width
         self.H = image_height
@@ -107,15 +117,19 @@ class ImageRowCollator:
         self.invalid_label = -100
         self.use_standard_causal = use_standard_causal
         
-        self.eoi_token_id = 8196
-        self.boi_token_id = 8197
-        self.eol_token_id = 8803
-        self.eos_token_id = 8710
+        self.eoi_token_id = eoi_token_id
+        self.boi_token_id = boi_token_id
+        self.eol_token_id = eol_token_id
+        self.eos_token_id = eos_token_id
+        self.img_token_id = img_token_id
 
+        self.token_check_func = token_check_func
+        
     def __call__(self, batch):
         # batch: List[Dict[str, torch.Tensor]]
-        check_image(batch, self.W, self.H)
+        self.token_check_func(batch, self.W, self.H)
         token_ids = [sample["input_ids"] for sample in batch]
+
         if self.use_teacher:
             # check length
             teacher_token = [sample["teacher_token"] for sample in batch]
@@ -237,18 +251,6 @@ class ImageRowCollator:
                 "attention_mask": attention_mask
             }
 
-def check_image(batch, W=49, H=48):
-    img_length = W * H
-    for sample in batch:
-        token_ids = sample["input_ids"]
-        assert token_ids[-1] == 8710    # end of sequence
-        assert token_ids[-2] == 8196    # end of image
-        prompt_len = len(token_ids) - 2 - 3 - img_length
-        assert token_ids[prompt_len-1] == 8710 # end of sequence (text prompt end)
-        assert token_ids[prompt_len] == 8197 # start of image
-        for idx in range(prompt_len+2, prompt_len+2+img_length, W):
-            assert token_ids[idx+W] == 8803 # 
-
 
 def create_dataloader(
     data_dir, batch_size=32, image_width=49, image_height=48, block_size=48,
@@ -293,11 +295,12 @@ if __name__ == "__main__":
     base_rss = rss_mb()
     base_tensor_bytes = 0
 
-    COCO17_path = "/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train"
+    Lumina_COCO17_path = "/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train"
+    Emu3_COCO_path = "/home/ffc3/bht/NRP/datasets/COCO_Emu3_tokens_for_train"
     B, N, NB = 32, 1, True
     cnt = 0
-    use_teacher = True
-    loader = create_dataloader(COCO17_path, batch_size=B, use_teacher=use_teacher)
+    use_teacher = False
+    loader = create_dataloader(Emu3_COCO_path, batch_size=B, use_teacher=use_teacher, image_width=91, image_height=90)
     Lmax = 0
 
     t0 = time.time()

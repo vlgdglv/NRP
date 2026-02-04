@@ -63,7 +63,7 @@ if __name__ == "__main__":
     emu_vq_model_path = "/home/ffc3/bht/model_home/Emu3-VisionTokenizer/"
     device = "cuda:0"
     max_new_tokens = 8192
-    image_top_k = args.image_top_k
+    image_top_k = 1024
     cfg_guidance_scale = 3.0
     
     model = AutoModelForCausalLM.from_pretrained(
@@ -91,13 +91,14 @@ if __name__ == "__main__":
     )
 
     sampler = Emu3Sampler(model, tokenizer)
-    
+    total_valid_samples = 0
+    decode_image = False
     for offset, item in tqdm(enumerate(all_prompts), total=len(all_prompts), desc="Collecting Stats"):
         idx = offset + args.begin
         caption = item["caption"]
-        
-        mm_list, time_uesd, tokens = batched_cfg_sample(
-            caption + POSITIVE_PROMPT,
+        prompt = caption + POSITIVE_PROMPT
+        returns = batched_cfg_sample(
+            prompt,
             NEGATIVE_PROMPT,
             model,
             processor,
@@ -108,16 +109,19 @@ if __name__ == "__main__":
             pad_token_id=model.config.pad_token_id,
             max_new_tokens=max_new_tokens,
             seed=SEED,
-            return_tokens=True
+            return_tokens=True,
+            do_decode_image=decode_image
         )
-        
-        for img in mm_list:
-            if isinstance(img, Image.Image):
-                result_image = img
-                break
-        
-        result_image.save(os.path.join(save_stats_dir, "image_sample_{}.png".format(idx)))
-        print("Sample", idx, " token shape: ", tokens.shape)
+        if decode_image:
+            mm_list, time_uesd, tokens = returns
+            for img in mm_list:
+                if isinstance(img, Image.Image):
+                    result_image = img
+                    break
+            result_image.save(os.path.join(save_stats_dir, "image_sample_{}.png".format(idx)))
+        else:
+            tokens, time_uesd = returns
+        # print("Sample", idx, " token shape: ", tokens.shape)
         data_load = {
             # "hidden_states": hidden_states,
             # "logits": logits,
