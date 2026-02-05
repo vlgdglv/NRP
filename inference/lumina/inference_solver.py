@@ -329,7 +329,6 @@ class FlexARInferenceSolver:
             print("peft_config:", getattr(lora_model, "peft_config", None))
 
             self.sampler = RowParallelSampler(
-                # self.model,
                 lora_model,
                 self.item_processor.tokenizer,
                 image_start_token=self.item_processor.token2id(self.item_processor.image_start_token),
@@ -357,7 +356,6 @@ class FlexARInferenceSolver:
         draft_use_causal_mask: bool = False,
         **kwargs
     ):
-
         conversations = []
         for q, a in qas:
             conversations.append(

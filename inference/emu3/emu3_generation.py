@@ -11,7 +11,7 @@ from datetime import datetime
 import random
 import numpy as np
 
-from inference.sampler import SamplerEngine, RowParallelSampler
+from inference.sampler import SamplerEngine
 from utils.logger import get_logger
 
 from model.emu3_arch.mllm.processing_emu3 import Emu3Processor

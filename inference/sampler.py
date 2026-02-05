@@ -6,6 +6,7 @@ import numpy as np
 
 from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 from transformers.cache_utils import DynamicCache
+# from peft import set_adapter, disable_adapter
 
 from utils.logger import get_logger
 from utils import rollback_kv_cache
@@ -146,7 +147,6 @@ class SamplerEngine:
         cfg_scale: float = 3.0,
         is_prefill: bool = True,
         is_multi_token: bool = False,
-        **kwargs
     ):
         outputs = self.model(
             input_ids=input_ids,
@@ -183,7 +183,7 @@ class SamplerEngine:
             next_token = torch.argmax(scores, dim=-1, keepdim=True)
 
         return next_token, outputs
-        
+
 
 class RowParallelSampler(SamplerEngine):
     """
@@ -192,7 +192,6 @@ class RowParallelSampler(SamplerEngine):
     def __init__(
         self,
         model,
-        lora_model=None,
         tokenizer=None,
         *,
         image_start_token,
@@ -201,7 +200,6 @@ class RowParallelSampler(SamplerEngine):
         **kwargs
     ):
         super().__init__(model=model, tokenizer=tokenizer)
-        self.lora_model = lora_model
         self.image_start_token = image_start_token
         self.image_end_token = image_end_token
         self.image_end_line_token = image_end_line_token
@@ -221,7 +219,7 @@ class RowParallelSampler(SamplerEngine):
         cfg_scale: float = 3.0,
         seed: int = None,
         use_cache: bool = True,
-        ar_rows: int = 12,
+        ar_rows: int = 4,
         parallel_as_draft: bool = False,
         draft_use_bi_mask: bool = True,
         block_size: int = 48,
@@ -252,7 +250,7 @@ class RowParallelSampler(SamplerEngine):
         if do_cfg:
             input_ids = input_ids.repeat(2, 1)
             attention_mask = attention_mask.repeat(2, 1, 1)
-            attention_mask[1::2, :prefill_length - 1] = 0
+            attention_mask[1::2,:, :prefill_length - 1] = 0
 
         ar_row_done = False
         generated_hidden_states, generated_tokens = [], []
@@ -393,7 +391,7 @@ class RowParallelSampler(SamplerEngine):
                 else:
                     token_sequence = torch.cat([token_sequence, next_blk_token], dim=-1)
                     input_ids = next_blk_token
-        
+
 
         # Ending: ensure sample is finished
         input_ids = token_sequence[:, -1]

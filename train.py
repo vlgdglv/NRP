@@ -7,7 +7,7 @@ import torch
 import argparse
 from transformers import Trainer, TrainingArguments
 
-from data.dataset import TokenDataset, ImageRowCollator, ImageRowBlockWiseCollator
+from data.dataset import TokenDataset, ImageRowCollator
 from model.base_model import load_lumina_with_lora, load_emu3_with_lora
 from model.modeling_draft import RowExpertModel
 from model import lumina_img_token_config, emu3_img_token_config
@@ -80,7 +80,7 @@ def train(args):
         # start_idx=0,
         # end_idx=10000,
     )
-    collator = ImageRowBlockWiseCollator(
+    collator = ImageRowCollator(
         image_width=image_width, 
         image_height=image_height, 
         use_standard_causal=use_standard_causal, 
