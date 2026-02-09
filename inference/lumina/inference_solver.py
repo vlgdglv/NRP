@@ -14,7 +14,7 @@ from peft import PeftModel
 
 from inference.lumina.data.item_processor import FlexARItemProcessor
 from model.lumina_arch.chameleon import ChameleonForConditionalGeneration
-from inference.sampler import SamplerEngine, RowParallelSampler
+from inference.sampler import SamplerEngine, RowParallelSampler, RowParallelWithVerifySampler
 
 
 def get_token_row(token_idx, row_len):
@@ -328,7 +328,8 @@ class FlexARInferenceSolver:
             print("has peft_config:", hasattr(lora_model, "peft_config"))
             print("peft_config:", getattr(lora_model, "peft_config", None))
 
-            self.sampler = RowParallelSampler(
+            # self.sampler = RowParallelSampler(
+            self.sampler = RowParallelWithVerifySampler(
                 lora_model,
                 self.item_processor.tokenizer,
                 image_start_token=self.item_processor.token2id(self.item_processor.image_start_token),
@@ -474,6 +475,85 @@ class FlexARInferenceSolver:
         logits_processor.append(topk_processor)
 
         return logits_processor
+    
+    @torch.no_grad()
+    def collect_tokens(
+        self,
+        images,
+        qas,
+        max_gen_len,
+        temperature,
+        cfg_guidance_scale=None,
+        logits_processor=None,
+        seed: int = None,
+        do_decode_image=None,
+    ):
+        conversations = []
+        for q, a in qas:
+            conversations.append({"from": "human", "value": q})
+            conversations.append({"from": "gpt", "value": a})
+        item = {"image": images, "conversations": conversations}
+
+        _prompt = self.item_processor.process_item(item)
+        prompt = []
+        for value in _prompt:
+            if isinstance(value, int):
+                prompt.append(value)
+            else:
+                prompt += value["input_ids"]
+
+        prompt_len = len(prompt)
+        prompt = torch.tensor(prompt, dtype=torch.int64, device=self.model.device).unsqueeze(0)
+
+        generation_config = GenerationConfig(
+            max_new_tokens=max_gen_len,
+            max_length=self.model.config.max_position_embeddings,
+            temperature=temperature,
+            top_k=None,
+            do_sample=True,
+            eos_token_id=[8710],
+        )
+
+        if logits_processor is None:
+            logits_processor = self.create_logits_processor()
+
+        self.model.prompt_len = prompt_len 
+
+        # collected_hidden_states = []
+        # collected_logits = []
+        # def capture_hook(module, args, output):
+        #     collected_hidden_states.append(args[0].detach().cpu())
+        #     collected_logits.append(output.detach().cpu())
+
+        # hook_handle = self.model.lm_head.register_forward_hook(capture_hook)
+        # with torch.cuda.amp.autocast(dtype=self.dtype):
+        #     output = self.model.generate(
+        #         prompt, generation_config, logits_processor=logits_processor, streamer=streamer
+        #     )
+        #     full_tokens = output[0]
+        #     image_tokens = full_tokens[prompt_len:].tolist()
+        #     if len(image_tokens) > 0 and image_tokens[-1] == 8710:
+        #         image_tokens = image_tokens[:-1]
+                
+        with torch.cuda.amp.autocast(dtype=self.dtype), torch.no_grad():
+            token_sequence = self.sampler.sample(
+                input_ids=prompt,
+                logits_processor=logits_processor,
+                temperature=temperature,
+                max_length=max_gen_len,
+                eos_token_id=8710,
+                do_cfg=True,
+                cfg_scale=cfg_guidance_scale,
+                seed=seed,
+            )
+        image_tokens = token_sequence[0][prompt_len:-1].tolist()
+        
+        # hook_handle.remove()
+        if do_decode_image:
+            return token_sequence, self.decode_ids(image_tokens)
+        else:
+            return token_sequence
+
 
 
 if __name__ == "__main__":

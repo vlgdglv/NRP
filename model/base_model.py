@@ -5,11 +5,15 @@ from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_tr
 from utils.logger import get_logger
 from utils import is_rank0
 
-from model.lumina_arch.chameleon import ChameleonForConditionalGeneration
+def import_lumina():
+    from model.lumina_arch.chameleon.modeling_chameleon import ChameleonForConditionalGeneration
+    return ChameleonForConditionalGeneration
 
-from model.emu3_arch.mllm.processing_emu3 import Emu3Processor
-from model.emu3_arch.mllm.modeling_emu3 import Emu3ForCausalLM
-from model.emu3_arch.tokenizer.modeling_emu3visionvq import Emu3VisionVQModel
+def import_emu3():
+    from model.emu3_arch.mllm.processing_emu3 import Emu3Processor
+    from model.emu3_arch.mllm.modeling_emu3 import Emu3ForCausalLM
+    from model.emu3_arch.tokenizer.modeling_emu3visionvq import Emu3VisionVQModel
+    return Emu3Processor, Emu3ForCausalLM, Emu3VisionVQModel
 
 from transformers import AutoTokenizer, AutoImageProcessor
 from transformers import BitsAndBytesConfig
@@ -24,6 +28,14 @@ def load_lumina_with_lora(
     lora_rank=64, 
     lora_alpha=128
 ):
+    try:
+        ChameleonForConditionalGeneration = import_lumina()
+    except Exception as e:
+        raise ImportError(
+            "Emu3 backend is not available in this environment. "
+            "Likely transformers/torch version mismatch or missing optional deps. "
+            f"Original error: {type(e).__name__}: {e}"
+        ) from e
 
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
@@ -73,6 +85,15 @@ def load_emu3_with_lora(
     lora_rank=64, 
     lora_alpha=128
 ):
+    try:
+        Emu3Processor, Emu3ForCausalLM, Emu3VisionVQModel = import_emu3()
+    except Exception as e:
+        raise ImportError(
+            "Emu3 backend is not available in this environment. "
+            "Likely transformers/torch version mismatch or missing optional deps. "
+            f"Original error: {type(e).__name__}: {e}"
+        ) from e
+
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.bfloat16,

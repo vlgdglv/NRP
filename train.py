@@ -77,8 +77,8 @@ def train(args):
         use_teacher=args.use_teacher, 
         teacher_data_dir=args.teacher_data_dir,
         # temperary setting for ensuring fair comparison
-        # start_idx=0,
-        # end_idx=10000,
+        start_idx=0,
+        end_idx=10000,
     )
     collator = ImageRowCollator(
         image_width=image_width, 
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--block_size", type=int, default=48)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--save_strategy", type=str, default="steps") # "no", "epoch", "steps"
     parser.add_argument("--save_steps", type=int, default=2500)

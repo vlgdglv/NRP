@@ -4,7 +4,7 @@ infer_count=${3:-1}
 
 # conda activate gsd310
 
-CUDA_VISIBLE_DEVICES=7 python inference/infer_lumina.py \
+CUDA_VISIBLE_DEVICES=3 python inference/infer_lumina.py \
     --row_parallel \
     --lora_path training_outputs/lumina/$test_lora_name \
     --save_name $save_name \
