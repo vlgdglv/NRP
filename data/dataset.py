@@ -9,6 +9,7 @@ from utils.logger import get_logger
 from utils import is_rank0
 
 from typing import Callable
+from model import lumina_img_token_config
 
 logger = get_logger(__name__)
 
@@ -16,44 +17,111 @@ logger = get_logger(__name__)
 class TokenDataset(Dataset):
     def __init__(
         self, 
-        data_dir, 
-        file_ext=".pt",
-        start_idx=-1,
-        end_idx=-1,
-        use_teacher=False,
-        teacher_data_dir=None,
-        teacher_file_name="teacher_token_logits_{}_top16.pt"
+        data_dir: str | list[str], 
+        dataset_name: str | list[str] | None = None,
+        file_ext: str = ".pt",
+        start_idx: int = -1,
+        end_idx: int = -1,
+        use_teacher: bool = False,
+        teacher_data_dir: str = None,
+        teacher_file_name: str = "teacher_token_logits_{}_top16.pt",
     ):
         super().__init__()
+
+        if dataset_name is None or isinstance(dataset_name, str):
+            dataset_names_list = None
+        else:
+            dataset_names_list = list(dataset_name)
+
+        dirs = []
+
+        if dataset_names_list is None:
+            if not isinstance(data_dir, str):
+                raise TypeError("data_dir must be a string if dataset_names is None")
+            dirs = [(dataset_name, data_dir)]
+        else:
+            if isinstance(data_dir, str):
+                dirs = [(name, os.path.join(data_dir, name)) for name in dataset_names_list]
+            else:
+                if len(data_dir) != len(dataset_names_list):
+                    raise ValueError(f"data_dir list length ({len(data_dir)}) must match dataset_names length ({len(dataset_names_list)}).")
+                dirs = list(zip(dataset_names_list, data_dir))
+
+        teacher_dirs: list[str | None] = []
+        if use_teacher:
+            if teacher_data_dir is None:
+                teacher_dirs = [None] * len(dirs)
+            elif isinstance(teacher_data_dir, str):
+                teacher_dirs = [teacher_data_dir] * len(dirs)
+            else:
+                if len(teacher_data_dir) != len(dirs):
+                    raise ValueError(
+                        f"teacher_data_dir list length ({len(teacher_data_dir)}) must match number of datasets ({len(dirs)})."
+                    )
+                teacher_dirs = list(teacher_data_dir)
+
         self.samples = []
-        files = sorted(glob.glob(os.path.join(data_dir, f"*{file_ext}")), key=lambda x: int(os.path.basename(x).split("_")[-1].split(".")[0]))
-        if start_idx != -1 and end_idx != -1:
-            files = files[start_idx:end_idx]
         self.use_teacher = use_teacher
         if use_teacher:
             self.teacher_samples = []
-        
-        iterator = tqdm(files) if is_rank0() else files
-        for f_path in iterator:
-            try:
-                payload =  torch.load(f_path, map_location="cpu", weights_only=True)
-                token_seq = payload["tokens"]
-                if not isinstance(token_seq, torch.Tensor):
-                    token_seq = torch.tensor(token_seq, dtype=torch.int32)
-                if token_seq.shape[0] == 1:
-                    token_seq = token_seq.squeeze(0)
-                if use_teacher and teacher_data_dir and teacher_file_name:
-                    sample_idx = f_path.split("/")[-1].split(".")[0].split("_")[-1] # "hs_sample_1004.pt"
-                    # print(f_path, " sample_idx", sample_idx)
-                    teacher_token, teacher_logits = torch.load(os.path.join(teacher_data_dir, teacher_file_name.format(sample_idx)), map_location="cpu", weights_only=True)
-                    self.teacher_samples.append((teacher_token, teacher_logits))
-                self.samples.append(token_seq)
-            except Exception as e:
-                logger.error(f"Failed to load {f_path}: {e}")
+        # files = sorted(glob.glob(os.path.join(data_dir, f"*{file_ext}")), key=lambda x: int(os.path.basename(x).split("_")[-1].split(".")[0]))
+        if start_idx != -1 and end_idx != -1:
+            files = files[start_idx:end_idx]
+
+        def _idx_key(path: str) -> int:
+            base = os.path.basename(path)
+            return int(base.split("_")[-1].split(".")[0])
+
+        total_loaded = 0
+        for ds_i, (ds_name, ds_dir) in enumerate(dirs):
+            files = sorted(glob.glob(os.path.join(ds_dir, f"*{file_ext}")), key=_idx_key)
+
+            if start_idx != -1 and end_idx != -1:
+                files = files[start_idx:end_idx]
+            
+            loaded_this = 0
+
+            iterator = tqdm(files, desc=f"Loading {ds_name}") if is_rank0() else files
+            for f_path in iterator:
+                try:
+                    payload =  torch.load(f_path, map_location="cpu", weights_only=True)
+                    token_seq = payload["tokens"]
+
+                    if not isinstance(token_seq, torch.Tensor):
+                        token_seq = torch.tensor(token_seq, dtype=torch.int32)
+                    if token_seq.shape[0] == 1:
+                        token_seq = token_seq.squeeze(0)
+
+                    if use_teacher and teacher_data_dir and teacher_file_name:
+                        tdir = teacher_dirs[ds_i]
+                        if tdir and teacher_file_name:
+                            sample_idx = os.path.basename(f_path).split(".")[0].split("_")[-1]
+                            teacher_token, teacher_logits = torch.load(
+                                os.path.join(tdir, teacher_file_name.format(sample_idx)),
+                                map_location="cpu",
+                                weights_only=True,
+                            )
+                            self.teacher_samples.append((teacher_token, teacher_logits))
+                        else:
+                            raise ValueError(f"use_teacher=True but teacher_data_dir not provided for dataset '{ds_name}'.")
+
+                    self.samples.append(token_seq)
+                    loaded_this += 1
+                    total_loaded += 1
+                except Exception as e:
+                    logger.error(f"Failed to load {f_path}: {e}")
+            
+            if is_rank0():
+                logger.info(f"[{ds_name}] Loaded {loaded_this} samples from {ds_dir}.")
         
         if is_rank0():
-            logger.info(f"Found and loaded {len(self.samples)} samples into RAM from {data_dir}.")
-
+            if dataset_names_list is None:
+                logger.info(f"Found and loaded {total_loaded} samples into RAM from {dirs[0][1]}.")
+            else:
+                logger.info(f"Found and loaded {total_loaded} samples into RAM from {len(dirs)} datasets: {[n for n, _ in dirs]}.")
+        
+        if self.use_teacher and len(self.teacher_samples) != len(self.samples):
+            raise RuntimeError(f"Teacher/sample length mismatch: teacher={len(self.teacher_samples)}, samples={len(self.samples)}")
 
     def __len__(self):
         return len(self.samples)
@@ -127,7 +195,8 @@ class ImageRowCollator:
         
     def __call__(self, batch):
         # batch: List[Dict[str, torch.Tensor]]
-        self.token_check_func(batch, self.W, self.H)
+        if self.token_check_func is not None:
+            self.token_check_func(batch, self.W, self.H)
         token_ids = [sample["input_ids"] for sample in batch]
 
         if self.use_teacher:
@@ -253,16 +322,22 @@ class ImageRowCollator:
 
 
 def create_dataloader(
-    data_dir, batch_size=32, image_width=49, image_height=48, block_size=48,
+    data_dir, dataset_name, batch_size=32, image_width=49, image_height=48, block_size=48,
     use_teacher=False, teacher_data_dir="/home/ffc3/bht/NRP/datasets/COCO_Lumina7B_training",
 ):
-    dataset = TokenDataset(data_dir, use_teacher=use_teacher, teacher_data_dir=teacher_data_dir)
+    dataset = TokenDataset(
+        data_dir=data_dir, 
+        dataset_name=dataset_name,
+        use_teacher=use_teacher, 
+        teacher_data_dir=teacher_data_dir
+    )
 
     collator = ImageRowCollator(
         image_width=image_width,
         image_height=image_height,
         block_size=block_size,
-        use_teacher=use_teacher
+        use_teacher=use_teacher,
+        **lumina_img_token_config,
     )
 
     num_workers = min(os.cpu_count(), 8)
@@ -296,11 +371,26 @@ if __name__ == "__main__":
     base_tensor_bytes = 0
 
     Lumina_COCO17_path = "/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train"
-    Emu3_COCO_path = "/home/ffc3/bht/NRP/datasets/COCO_Emu3_tokens_for_train"
+    Lumina_laion_path = "/home/ffc3/bht/NRP/datasets/laion_Lumina7B_tokens_for_train"
+    Lumina_midjourney_path = "/home/ffc3/bht/NRP/datasets/midjourney_Lumina7B_tokens_for_train"
+
+    data_dir = [
+        Lumina_COCO17_path, 
+        Lumina_laion_path, 
+        Lumina_midjourney_path
+    ]
+    dataset_name = [
+        "COCO",
+        "laion", 
+        "midjourney"
+    ]
+    
+    # Emu3_COCO_path = "/home/ffc3/bht/NRP/datasets/COCO_Emu3_tokens_for_train"
     B, N, NB = 32, 1, True
+    W, H = 49, 48
     cnt = 0
     use_teacher = False
-    loader = create_dataloader(Emu3_COCO_path, batch_size=B, use_teacher=use_teacher, image_width=91, image_height=90)
+    loader = create_dataloader(data_dir=data_dir, dataset_name=dataset_name, batch_size=B, use_teacher=use_teacher, image_width=W, image_height=H)
     Lmax = 0
 
     t0 = time.time()

@@ -17,6 +17,29 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def normalize_dataset_cfg(args):
+    dataset_names = args.dataset_name
+    data_paths = args.data_path
+
+    if len(dataset_names) == 1:
+        return {
+            "dataset_names": dataset_names[0],
+            "data_dir": data_paths[0],
+        }
+    if len(data_paths) == 1:
+        return {
+            "dataset_names": dataset_names,
+            "data_dir": data_paths[0],
+        }
+    if len(dataset_names) == len(data_paths):
+        for name, path in zip(dataset_names, data_paths):
+            assert name.lower() in path.lower()
+        return {
+            "dataset_names": dataset_names,
+            "data_dir": data_paths,
+        }
+    raise ValueError(f"Invalid dataset config: dataset_name={dataset_names}, data_path={data_paths}")
+
 def train(args):
     model_name = args.model_name.lower().strip()
     model_path = args.model_path
@@ -72,14 +95,18 @@ def train(args):
     model.base_model.gradient_checkpointing_enable()
     model.base_model.enable_input_require_grads()
 
+    dataset_cfg = normalize_dataset_cfg(args)
     train_dataset = TokenDataset(
-        data_path, 
+        data_dir=dataset_cfg["data_dir"],
+        dataset_name=dataset_cfg["dataset_names"], 
         use_teacher=args.use_teacher, 
         teacher_data_dir=args.teacher_data_dir,
         # temperary setting for ensuring fair comparison
-        start_idx=0,
-        end_idx=10000,
+        # start_idx=0,
+        # end_idx=10000,
     )
+
+    assert args.block_size+1 == image_width, "Do not support block-wise prediction in single row." 
     collator = ImageRowCollator(
         image_width=image_width, 
         image_height=image_height, 
@@ -126,7 +153,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="lumina")
     parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Lumina-mGPT-7B-768")
-    parser.add_argument("--data_path", type=str, default="/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train")
+    parser.add_argument("--dataset_name", type=str, nargs="+", default=["COCO"])
+    parser.add_argument("--data_path", type=str, nargs="+", default=["/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train"])
     parser.add_argument("--teacher_data_dir", type=str, default="/home/ffc3/bht/NRP/datasets/COCO_Lumina7B_training")
     parser.add_argument("--output_dir", type=str, default="training_outputs/lumina")
     parser.add_argument("--epochs", type=int, default=1)
