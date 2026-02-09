@@ -5,6 +5,7 @@ from datetime import datetime
 from transformers import AutoModelForCausalLM
 
 from model.janus_arch.models import MultiModalityCausalLM, VLChatProcessor
+from inference.janus.generation import build_prompt, generate, gererate_row_parallel, decode_image
 import numpy as np
 import os, time
 import PIL.Image
@@ -13,8 +14,17 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def slugify_first_words(text: str, n=6) -> str:
+    import re
+    words = text.strip().split()
+    base = "-".join(words[:n]).lower()
+    base = re.sub(r"[^a-z0-9\-]+", "", base)
+    return base or "img"
+
+
 image_content_prompts = [
     'A golden retriever lying peacefully on a wooden porch, with autumn leaves scattered around.',
+    'The image features an intricately designed eye set against a circular backdrop adorned with ornate swirl patterns that evoke both realism and surrealism. At the center of attention is a strikingly vivid blue iris surrounded by delicate veins radiating outward from the pupil to create depth and intensity. The eyelashes are long and dark, casting subtle shadows on the skin around them which appears smooth yet slightly textured as if aged or weathered over time. Above the eye, there\'s a stone-like structure resembling part of classical architecture, adding layers of mystery and timeless elegance to the composition. This architectural element contrasts sharply but harmoniously with the organic curves surrounding it. Below the eye lies another decorative motif reminiscent of baroque artistry, further enhancing the overall sense of eternity encapsulated within each meticulously crafted detail. Overall, the atmosphere exudes a mysterious aura intertwined seamlessly with elements suggesting timelessness, achieved through the juxtaposition of realistic textures and surreal artistic flourishes. Each component—from the intricate designs framing the eye to the ancient-looking stone piece above—contributes uniquely towards creating a visually captivating tableau imbued with enigmatic allure.'
     'A close-up high-contrast photo of Sydney Opera House sitting next to Eiffel tower, under a blue night sky of roiling energy, exploding yellow stars, and radiating swirls of blue.',
     'close-up two birds on a tree branch, background of blue sky with cumulus clouds and rising sun, 4k, realistic',
     'Three penguins in yellow construction helmets, building a sandcastle on a tropical beach, one holding a blueprint, the ocean behind them glowing in soft blue hues under the setting sun, hyperrealistic textures, playful and cinematic',
@@ -44,82 +54,6 @@ image_content_prompts = [
     '4k, realistic, photography, Giant Tree on the hill, afternoon',
 ]
 
-def build_prompt(desc: str) -> str:
-    conv = [{"role": "User", "content": desc}, {"role": "Assistant", "content": ""}]
-    s = vl_chat_processor.apply_sft_template_for_multi_turn_prompts(
-        conversations=conv,
-        sft_format=vl_chat_processor.sft_format,
-        system_prompt="",
-    )
-    return s + vl_chat_processor.image_start_tag
-
-def slugify_first_words(text: str, n=6) -> str:
-    import re
-    words = text.strip().split()
-    base = "-".join(words[:n]).lower()
-    base = re.sub(r"[^a-z0-9\-]+", "", base)
-    return base or "img"
-
-@torch.inference_mode()
-def generate(
-    mmgpt: MultiModalityCausalLM,
-    vl_chat_processor: VLChatProcessor,
-    prompt: str,
-    temperature: float = 1,
-    parallel_size: int = 1,
-    cfg_weight: float = 5,
-    image_token_num_per_image: int = 576,
-    img_size: int = 384,
-    patch_size: int = 16,
-    save_dir: str = None,
-    save_name_base: str | None = None,
-):
-    input_ids = vl_chat_processor.tokenizer.encode(prompt)
-    input_ids = torch.LongTensor(input_ids)
-
-    tokens = torch.zeros((parallel_size*2, len(input_ids)), dtype=torch.int).cuda()
-    for i in range(parallel_size*2):
-        tokens[i, :] = input_ids
-        if i % 2 != 0:
-            tokens[i, 1:-1] = vl_chat_processor.pad_id
-
-    inputs_embeds = mmgpt.language_model.get_input_embeddings()(tokens)
-    generated_tokens = torch.zeros((parallel_size, image_token_num_per_image), dtype=torch.int).cuda()
-
-    for i in range(image_token_num_per_image):
-        outputs = mmgpt.language_model.model(inputs_embeds=inputs_embeds, use_cache=True, past_key_values=outputs.past_key_values if i != 0 else None)
-        hidden_states = outputs.last_hidden_state
-        
-        logits = mmgpt.gen_head(hidden_states[:, -1, :])
-        logit_cond = logits[0::2, :]
-        logit_uncond = logits[1::2, :]
-        
-        logits = logit_uncond + cfg_weight * (logit_cond-logit_uncond)
-        probs = torch.softmax(logits / temperature, dim=-1)
-
-        next_token = torch.multinomial(probs, num_samples=1)
-        generated_tokens[:, i] = next_token.squeeze(dim=-1)
-
-        next_token = torch.cat([next_token.unsqueeze(dim=1), next_token.unsqueeze(dim=1)], dim=1).view(-1)
-        img_embeds = mmgpt.prepare_gen_img_embeds(next_token)
-        inputs_embeds = img_embeds.unsqueeze(dim=1)
-
-    dec = mmgpt.gen_vision_model.decode_code(generated_tokens.to(dtype=torch.int), shape=[parallel_size, 8, img_size//patch_size, img_size//patch_size])
-    dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
-
-    dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
-
-    visual_img = np.zeros((parallel_size, img_size, img_size, 3), dtype=np.uint8)
-    visual_img[:, :, :] = dec
-
-    os.makedirs(save_dir, exist_ok=True)
-    saved_paths = []
-    for i in range(parallel_size):
-        name = save_name_base or "img"
-        save_path = os.path.join(save_dir, f"{name}_{i}.jpg")
-        PIL.Image.fromarray(dec[i]).save(save_path)
-        saved_paths.append(save_path)
-    return saved_paths
 
 
 if __name__ == "__main__":
@@ -138,6 +72,7 @@ if __name__ == "__main__":
     parser.add_argument("--block_size", type=int, default=48)
     parser.add_argument("--cfg_guidance_scale", type=float, default=5.0)
     parser.add_argument("--lora_path", type=str, default=None)
+    parser.add_argument("--do_decode", action="store_true")
     parser.add_argument("--row_parallel", action="store_true")
     parser.add_argument("--do_warmup", type=int, default=1)
     parser.add_argument("--infer_count", type=int, default=-1, help="number of inference")
@@ -167,17 +102,37 @@ if __name__ == "__main__":
 
     gen_kwargs = dict(
         parallel_size=1,
-        image_token_num_per_image=image_token_num_per_image,
+        
         img_size=target_size,
         patch_size=patch_size,
     )
 
     for idx, desc in enumerate(image_content_prompts):
-        prompt = build_prompt(desc)
+        prompt = build_prompt(desc, vl_chat_processor)
         base = slugify_first_words(desc, n=6)
 
         t0 = time.perf_counter()
-        paths = generate(vl_gpt, vl_chat_processor, prompt, save_dir=save_dir,save_name_base=f"{idx:02d}-{base}", **gen_kwargs)
+        if args.row_parallel:
+            token_sequence = gererate_row_parallel(
+                vl_gpt, vl_chat_processor, prompt, 
+                cfg_weight=args.cfg_guidance_scale,
+                ar_rows=24,
+                seed=42
+            )
+        else:
+            token_sequence = generate(
+                vl_gpt, vl_chat_processor, prompt, 
+                image_token_num_per_image=image_token_num_per_image,
+                cfg_weight=args.cfg_guidance_scale,
+                seed=42
+            )
+        paths = [None]
+        if args.do_decode:
+            paths = decode_image(
+                vl_gpt, token_sequence, 
+                img_size=target_size, patch_size=patch_size, 
+                save_dir=save_dir, save_name_base=f"{idx:02d}-{base}", 
+            )
         dt = time.perf_counter() - t0
-
         logger.info(f"[{idx}] {base}  ->  {dt:.2f}s  | saved: {paths[0]}")
+       
