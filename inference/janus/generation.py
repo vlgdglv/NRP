@@ -42,7 +42,7 @@ def decode_image(
     saved_paths = []
     for i in range(parallel_size):
         name = save_name_base or "img"
-        save_path = os.path.join(save_dir, f"{name}_{i}.jpg")
+        save_path = os.path.join(save_dir, f"{name}.jpg")
         PIL.Image.fromarray(dec[i]).save(save_path)
         saved_paths.append(save_path)
     return saved_paths
@@ -57,7 +57,8 @@ def generate(
     parallel_size: int = 1,
     cfg_weight: float = 5.0,
     image_token_num_per_image: int = 576,
-    seed: int = 42
+    seed: int = 42,
+    include_prefill: bool = False
 ):
     generator = torch.Generator(device="cuda").manual_seed(seed)
 
@@ -86,12 +87,16 @@ def generate(
 
         next_token = torch.multinomial(probs, num_samples=1, generator=generator)
         generated_tokens[:, i] = next_token.squeeze(dim=-1)
-        print("next token: ", int(next_token))
         next_token = torch.cat([next_token.unsqueeze(dim=1), next_token.unsqueeze(dim=1)], dim=1).view(-1)
         img_embeds = mmgpt.prepare_gen_img_embeds(next_token)
         inputs_embeds = img_embeds.unsqueeze(dim=1)
-
-    return generated_tokens
+    
+    if include_prefill:
+        print(input_ids.shape, generated_tokens.shape)
+        full_tokens = torch.cat([input_ids.unsqueeze(dim=0).to(generated_tokens), generated_tokens], dim=1)
+        return generated_tokens, full_tokens 
+    else:
+        return generated_tokens
 
 
 
@@ -164,7 +169,6 @@ def gererate_row_parallel(
     device = next(mmgpt.language_model.parameters()).device
     
     for r in range(ar_rows, image_height):
-        print("Row: ", r)
         # T_k = past[0][0].shape[2]
         # pos_base = L_prefill + r * image_width
         # Just use default attention mask

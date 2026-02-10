@@ -14,7 +14,7 @@ from peft import PeftModel
 
 from inference.lumina.data.item_processor import FlexARItemProcessor
 from model.lumina_arch.chameleon import ChameleonForConditionalGeneration
-from inference.sampler import SamplerEngine, RowParallelSampler, RowParallelWithVerifySampler
+from inference.sampler import SamplerEngine, RowParallelSampler
 
 
 def get_token_row(token_idx, row_len):
@@ -328,8 +328,8 @@ class FlexARInferenceSolver:
             print("has peft_config:", hasattr(lora_model, "peft_config"))
             print("peft_config:", getattr(lora_model, "peft_config", None))
 
-            # self.sampler = RowParallelSampler(
-            self.sampler = RowParallelWithVerifySampler(
+            self.sampler = RowParallelSampler(
+            # self.sampler = RowParallelWithVerifySampler(
                 lora_model,
                 self.item_processor.tokenizer,
                 image_start_token=self.item_processor.token2id(self.item_processor.image_start_token),
@@ -355,6 +355,7 @@ class FlexARInferenceSolver:
         seed: int = None,
         block_size:int = None,
         draft_use_causal_mask: bool = False,
+        ar_rows: int = 1,
         **kwargs
     ):
         conversations = []
@@ -398,6 +399,7 @@ class FlexARInferenceSolver:
                 seed=seed,
                 block_size=block_size,
                 draft_use_bi_mask=not draft_use_causal_mask, # stupid implementation
+                ar_rows=ar_rows,
             )
         image_tokens = token_sequence[0][prompt_len:-1].tolist()
     

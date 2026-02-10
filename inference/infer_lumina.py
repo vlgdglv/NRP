@@ -5,13 +5,15 @@ from PIL import Image
 import PIL.Image
 import torch
 import time
-
+from tqdm import tqdm
 from datetime import datetime
 import random
 import numpy as np
 
 from utils.logger import get_logger
 from inference.lumina.inference_solver import FlexARInferenceSolver
+
+from evaluation.eval_prompt_load import prompt_loader
 
 logger = get_logger(__name__)
 
@@ -67,6 +69,9 @@ if __name__ == "__main__":
     parser.add_argument("--save_name", type=str, default=None)
     parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Lumina-mGPT-7B-768")
     parser.add_argument("--vae_tokenizer_path", type=str, default="/home/ffc3/bht/GSD/ckpts/chameleon/tokenizer")
+    parser.add_argument("--prompt_path", type=str, default=None)
+    parser.add_argument("--prompt_start_idx", type=int, default=0)
+    parser.add_argument("--prompt_end_idx", type=int, default=-1)
     parser.add_argument("--target_size", type=int, default=768)
     parser.add_argument("--target_size_h", type=int, default=768)
     parser.add_argument("--target_size_w", type=int, default=768)
@@ -78,6 +83,7 @@ if __name__ == "__main__":
     parser.add_argument("--cfg_guidance_scale", type=float, default=3.0)
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--row_parallel", action="store_true")
+    parser.add_argument("--ar_rows", type=int, default=1)
     parser.add_argument("--do_warmup", type=int, default=1)
     parser.add_argument("--infer_count", type=int, default=-1, help="number of inference")
     parser.add_argument("--draft_use_causal_mask", action="store_true")
@@ -92,6 +98,7 @@ if __name__ == "__main__":
     image_top_k = args.image_top_k
     text_top_k = args.text_top_k
     cfg_guidance_scale = args.cfg_guidance_scale
+    ar_rows = args.ar_rows
     
     row_parallel = args.row_parallel
     lora_path = None
@@ -123,15 +130,31 @@ if __name__ == "__main__":
     image_logits_processor = inference_solver.create_logits_processor(cfg=cfg_guidance_scale, image_top_k=image_top_k)
     time_collector = []
     logger.info("start inference ...")
+
+    prompts_iterator = prompt_loader(args.prompt_path, args.prompt_start_idx, args.prompt_end_idx)
+    if args.prompt_start_idx == 0 and args.prompt_end_idx == -1:
+        total = None
+    else:
+        total = args.prompt_end_idx - args.prompt_start_idx
+
     for seed in seeds:
         inference_solver.model.seed = seed
-        for i, q_image_content_condition in enumerate(image_content_prompts):
+        for i, q_image_content_condition in enumerate(tqdm(prompts_iterator, total=total)):
             if args.infer_count > 0 and i >= args.infer_count:
                 break
+            
+            if  isinstance(q_image_content_condition, str):
+                prompt_text = q_image_content_condition 
+                name = 'img_' + str(i)
+            elif isinstance(q_image_content_condition, dict):
+                prompt_text = q_image_content_condition["prompt"]
+                name = str(q_image_content_condition["name"])
+            else:
+                raise NotImplementedError
+            
+            prompt_text = template_condition_sentences + prompt_text
         
-            prompt_text = template_condition_sentences + q_image_content_condition
-        
-            output_file_name = 'img_' + str(i) +'_seed' + str(seed) + ".png"
+            output_file_name = name +'_seed' + str(seed) + ".png"
             time_start = time.time()
             t1 = torch.cuda.Event(enable_timing=True)
             t2 = torch.cuda.Event(enable_timing=True)
@@ -148,7 +171,8 @@ if __name__ == "__main__":
                     logits_processor=image_logits_processor,
                     seed=seed,
                     block_size=args.block_size,
-                    draft_use_causal_mask=args.draft_use_causal_mask
+                    draft_use_causal_mask=args.draft_use_causal_mask,
+                    ar_rows=ar_rows
                 )
             t2.record()
             torch.cuda.synchronize()

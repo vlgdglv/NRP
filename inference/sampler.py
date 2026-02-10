@@ -147,6 +147,7 @@ class SamplerEngine:
         cfg_scale: float = 3.0,
         is_prefill: bool = True,
         is_multi_token: bool = False,
+        **kwargs
     ):
         outputs = self.model(
             input_ids=input_ids,
@@ -219,7 +220,7 @@ class RowParallelSampler(SamplerEngine):
         cfg_scale: float = 3.0,
         seed: int = None,
         use_cache: bool = True,
-        ar_rows: int = 4,
+        ar_rows: int = 1,
         parallel_as_draft: bool = False,
         draft_use_bi_mask: bool = True,
         block_size: int = 48,

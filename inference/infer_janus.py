@@ -106,7 +106,7 @@ if __name__ == "__main__":
         img_size=target_size,
         patch_size=patch_size,
     )
-
+    print(args.cfg_guidance_scale)
     for idx, desc in enumerate(image_content_prompts):
         prompt = build_prompt(desc, vl_chat_processor)
         base = slugify_first_words(desc, n=6)

@@ -15,7 +15,11 @@ def import_emu3():
     from model.emu3_arch.tokenizer.modeling_emu3visionvq import Emu3VisionVQModel
     return Emu3Processor, Emu3ForCausalLM, Emu3VisionVQModel
 
-from transformers import AutoTokenizer, AutoImageProcessor
+def import_janus():
+    from model.janus_arch.models import MultiModalityCausalLM, VLChatProcessor
+    return MultiModalityCausalLM, VLChatProcessor 
+
+from transformers import AutoModelForCausalLM, AutoConfig, AutoImageProcessor
 from transformers import BitsAndBytesConfig
 
 
@@ -138,14 +142,66 @@ def load_emu3_with_lora(
 
     return model
 
+
+def load_janus_with_lora(
+    model_path,
+    lora_rank=64, 
+    lora_alpha=128
+):
+    try:
+        MultiModalityCausalLM, VLChatProcessor = import_janus()
+    except Exception as e:
+        raise ImportError(
+            "Janus backend is not available in this environment. "
+            "Likely transformers/torch version mismatch or missing optional deps. "
+            f"Original error: {type(e).__name__}: {e}"
+        ) from e
+
+    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    print(type(cfg), cfg.__class__.__name__)
+
+    model = MultiModalityCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        device_map=None,
+        trust_remote_code=True
+    )
+
+    peft_config = LoraConfig(
+        r=lora_rank,
+        lora_alpha=lora_alpha,
+        target_modules=["q_proj", 
+                        "k_proj", 
+                        "v_proj", 
+                        "o_proj",
+                        "gate_proj", 
+                        "up_proj", 
+                        "down_proj",
+                        ],
+        modules_to_save=["gen_head"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type=TaskType.CAUSAL_LM
+    )
+
+    model = get_peft_model(model, peft_config)
+
+    if is_rank0():
+        print("model type:", type(model))
+        print("has peft_config:", hasattr(model, "peft_config"))
+        print("peft_config:", getattr(model, "peft_config", None))
+        model.print_trainable_parameters()
+
+    return model
+
+    
+
 if __name__ == "__main__":
     # lumina_model_path = "/home/ffc3/bht/model_home/Lumina-mGPT-7B-768"
-    # peft_model = load_lumina_with_lora(
-    #     model_path=lumina_model_path,
-    #     device="cuda",
-    #     lora_rank=64, 
-    #     lora_alpha=128
-    # )
+    # peft_model = load_lumina_with_lora(model_path=lumina_model_path, lora_rank=64, lora_alpha=128)
 
-    emu3_model_path = "/home/ffc3/bht/model_home/Emu3-Gen/"
-    peft_model = load_emu3_with_lora(model_path=emu3_model_path, lora_rank=8, lora_alpha=16)
+    # emu3_model_path = "/home/ffc3/bht/model_home/Emu3-Gen/"
+    # peft_model = load_emu3_with_lora(model_path=emu3_model_path, lora_rank=8, lora_alpha=16)
+
+    janus_model_path = "/home/ffc3/bht/model_home/Janus-Pro-7B/"
+    peft_model = load_janus_with_lora(model_path=janus_model_path, lora_rank=8, lora_alpha=16)

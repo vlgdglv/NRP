@@ -144,7 +144,7 @@ def train(args):
         data_collator=collator
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     model.base_model.save_pretrained(output_dir)
 
@@ -178,6 +178,7 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--deepspeed", type=str, default=None)
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
     args = parser.parse_args()
 
     train(args)
