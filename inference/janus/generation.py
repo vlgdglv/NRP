@@ -3,7 +3,7 @@ import argparse
 from datetime import datetime
 import torch
 import torch.nn.functional as F
-
+from inference.sampler import build_row_bidirectional_mask
 
 from model.janus_arch.models import MultiModalityCausalLM, VLChatProcessor
 import numpy as np
@@ -111,6 +111,7 @@ def gererate_row_parallel(
     image_height: int = 24,
     ar_rows: int = 1,
     seed: int = 42,
+    use_bi_mask: bool = True
 ):
     generator = torch.Generator(device="cuda").manual_seed(seed)
 
@@ -133,18 +134,24 @@ def gererate_row_parallel(
         logit_uncond = logits[1::2, :]
         return logit_uncond + cfg_weight * (logit_cond - logit_uncond)
 
+    attention_mask = torch.full_like(input_ids, 1, dtype=torch.int32).to("cuda")
+
     past = None
     pos_cur = L_prefill
 
     prev_row_embs = []
     for c in range(image_width * ar_rows):
+        if c > 0:
+            ones = torch.ones((input_embeddings.shape[0], 1), dtype=torch.int32, device="cuda")
+            attention_mask = torch.cat([attention_mask, ones], dim=1)
+
         out = mmgpt.language_model.model(
             inputs_embeds=input_embeddings,
             use_cache=True,
+            attention_mask=attention_mask,
             past_key_values=past,
         )
         hidden_states, past = out.last_hidden_state, out.past_key_values
-        # log = cfg_merge(mmgpt.gen_head(last_hidden_state[:, -1, :]), cfg_weight).squeeze(0) # [V]
         logits = mmgpt.gen_head(hidden_states[:, -1, :])
         logits = cfg_merge(logits, cfg_weight)
         probs = torch.softmax(logits / temperature, dim=-1)
@@ -159,7 +166,9 @@ def gererate_row_parallel(
 
         tok_emb = mmgpt.prepare_gen_img_embeds(torch.tensor([token_id, token_id], device="cuda").view(-1))       # [2, D]
         input_embeddings = tok_emb.unsqueeze(1)                      # [2,1,D]
-        # prev_row_embs.append(tok_emb[0].detach())
+
+        
+        prev_row_embs.append(tok_emb[0].detach())
 
         pos_cur += 1
 
@@ -169,31 +178,24 @@ def gererate_row_parallel(
     device = next(mmgpt.language_model.parameters()).device
     
     for r in range(ar_rows, image_height):
-        # T_k = past[0][0].shape[2]
-        # pos_base = L_prefill + r * image_width
-        # Just use default attention mask
-        # attn_mask = torch.full((2, 1, W, K_total), torch.finfo(torch.float16).min, device=device) #
-        # for c in range(W):
-        #     vis = _build_visible_indices_for_column(L_prefill, W, r, c, mask_policy, neighbor_k)
-        #     if len(vis):
-        #         idx = torch.as_tensor(vis, device=device, dtype=torch.long)
-        #         attn_mask[0, 0, c, idx] = 0.0
-        #         attn_mask[1, 0, c, idx] = 0.0
-        
         row_cond = torch.stack(prev_row_embs, dim=0).to(device)          # [W, D]
         step_emb = torch.stack([row_cond, row_cond], dim=0).contiguous() # [2, W, D]
         # pos_ids = (torch.arange(W, device=device, dtype=torch.long) + pos_base).unsqueeze(0).expand(2, -1)
+        ones = torch.ones(attention_mask.shape[0], step_emb.shape[1], dtype=torch.long, device=input_ids.device)
+        attention_mask = torch.cat([attention_mask, ones], dim=-1)
+        if use_bi_mask:
+            final_mask = build_row_bidirectional_mask(attention_mask, step_emb.shape[1]).to(step_emb.dtype)
+        else:
+            final_mask = attention_mask
         out_prop = mmgpt.language_model.model(
             inputs_embeds=step_emb,
             past_key_values=past,
-            # position_ids=pos_ids,
+            attention_mask=final_mask,
             use_cache=True
         )
         log_q = cfg_merge(mmgpt.gen_head(out_prop.last_hidden_state), cfg_weight).squeeze(0)
 
         q_probs  = F.softmax(log_q / (temperature), dim=-1)   
-        # for prob in q_probs:
-        #     probs_all.append(prob.float().detach().cpu())
 
         if do_sample:      # [W, V]
             proposal = torch.multinomial(q_probs, 1, generator=generator).squeeze(-1)      # [W]
@@ -205,7 +207,5 @@ def gererate_row_parallel(
     
         for c in range(image_width):
             generated_tokens[r * image_width + c] = int(final_row[c])
-
-        prev_row_embs.insert(0, prev_row_embs.pop())
 
     return generated_tokens

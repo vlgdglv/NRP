@@ -23,6 +23,8 @@ def check_image_for_emu3(batch, W=91, H=90):
         for idx in range(prompt_len-1, prompt_len-1+img_length, W):
             assert token_ids[idx+W] == 151846 # eol
 
+def check_image_for_janus(batch, W=24, H=24):
+    return True
 
 lumina_img_token_config = {
     "eoi_token_id": 8196,
@@ -40,5 +42,14 @@ emu3_img_token_config = {
     "eos_token_id": 151853,
     "img_token_id": -1,
     "token_check_func": check_image_for_emu3
+}
+
+janus_img_token_config = {
+    "eoi_token_id": 151847,
+    "boi_token_id": 151852,
+    "eol_token_id": 151846,
+    "eos_token_id": 151853,
+    "img_token_id": -1,
+    "token_check_func": check_image_for_janus
 }
 

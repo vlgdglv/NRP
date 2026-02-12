@@ -330,7 +330,7 @@ class RowParallelSampler(SamplerEngine):
                 attention_mask = torch.cat([attention_mask, ones], dim=-1)
 
                 if draft_use_bi_mask:
-                    mask4d = self._build_row_bidirectional_mask(attention_mask, input_ids.shape[-1])
+                    mask4d = build_row_bidirectional_mask(attention_mask, input_ids.shape[-1])
                 else:
                     logger.warning_once(
                         "Using causal mask in drafting."
@@ -434,19 +434,7 @@ class RowParallelSampler(SamplerEngine):
 
 
         return token_sequence
-
-    def _build_row_bidirectional_mask(self, attn_mask3d, row_len):
-        device = attn_mask3d.device
-        dtype = attn_mask3d.dtype
-
-        key_valid = attn_mask3d.to(torch.bool).unsqueeze(2).expand(-1, -1, row_len, -1)
-
-        neg_inf = torch.finfo(torch.float32).min
-        attn = torch.zeros_like(key_valid, dtype=torch.float32)
-        attn = attn.masked_fill(~key_valid, neg_inf)
-
-        return attn
-
+    
     def _get_decoding_position(self, token_sequence):
         self.num_image_start_tokens = (token_sequence[0] == self.image_start_token).sum()
         self.num_image_end_tokens = (token_sequence[0] == self.image_end_token).sum()
@@ -485,3 +473,18 @@ class RowParallelSampler(SamplerEngine):
         self.image_start_index = None
         self.img_h = None
         self.img_w = None
+
+
+def build_row_bidirectional_mask(attn_mask, row_len):
+    if attn_mask.dim() == 3:
+        attn_mask3d = attn_mask
+    else:
+        attn_mask3d = attn_mask.unsqueeze(1)
+
+    key_valid = attn_mask3d.to(torch.bool).unsqueeze(2).expand(-1, -1, row_len, -1)
+
+    neg_inf = torch.finfo(torch.float32).min
+    attn = torch.zeros_like(key_valid, dtype=torch.float32)
+    attn = attn.masked_fill(~key_valid, neg_inf)
+
+    return attn

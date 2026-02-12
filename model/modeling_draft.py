@@ -46,7 +46,7 @@ class RowExpertModel(nn.Module):
                 
             if self.use_ce:
                 shift_logits = logits.view(-1, logits.shape[-1])
-                shift_labels = labels.view(-1)
+                shift_labels = labels.view(-1).long()
 
                 loss_fn = CrossEntropyLoss()
                 ce_loss = loss_fn(shift_logits, shift_labels)

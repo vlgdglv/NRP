@@ -75,6 +75,7 @@ if __name__ == "__main__":
     parser.add_argument("--do_decode", action="store_true")
     parser.add_argument("--row_parallel", action="store_true")
     parser.add_argument("--do_warmup", type=int, default=1)
+    parser.add_argument("--ar_rows", type=int, default=1)
     parser.add_argument("--infer_count", type=int, default=-1, help="number of inference")
     parser.add_argument("--draft_use_causal_mask", action="store_true")
     args = parser.parse_args()
@@ -94,7 +95,7 @@ if __name__ == "__main__":
 
     vl_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(vl_processor_path)
     tokenizer = vl_chat_processor.tokenizer
-
+    print("PAD ID", vl_chat_processor.pad_id)
     vl_gpt: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
         model_path, trust_remote_code=True
     )
@@ -116,7 +117,7 @@ if __name__ == "__main__":
             token_sequence = gererate_row_parallel(
                 vl_gpt, vl_chat_processor, prompt, 
                 cfg_weight=args.cfg_guidance_scale,
-                ar_rows=24,
+                ar_rows=args.ar_rows,
                 seed=42
             )
         else:

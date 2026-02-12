@@ -28,6 +28,7 @@ from transformers import (
     PreTrainedModel,
 )
 from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .clip_encoder import CLIPVisionTower
 from .projector import MlpProjector
@@ -261,6 +262,54 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
     def prepare_gen_img_embeds(self, image_ids: torch.LongTensor):
         return self.gen_aligner(self.gen_embed(image_ids))
+    
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: torch.Tensor = None,
+        pixel_values: torch.FloatTensor = None,
+        images_seq_mask: torch.LongTensor = None,
+        images_emb_mask: torch.LongTensor = None,
+        labels: torch.LongTensor = None,
+        past_key_values=None,
+        inputs_embeds=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        **kwargs
+    ):
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if inputs_embeds is None:
+            inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+    
+        outputs = self.language_model.model(
+            input_ids=None,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+        hidden_states = outputs.last_hidden_state
+        lm_logits = self.gen_head(hidden_states)
+        loss = None
+        
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
 AutoConfig.register("vision", VisionConfig)

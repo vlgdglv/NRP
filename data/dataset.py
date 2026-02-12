@@ -222,7 +222,7 @@ class ImageRowCollator:
         B, L = input_ids.shape
         device = input_ids.device
 
-        labels = torch.full_like(input_ids, self.invalid_label)
+        labels = torch.full_like(input_ids, self.invalid_label, dtype=torch.long)
         causal_mask = torch.tril(torch.ones((L, L), dtype=torch.bool, device=device))
         final_mask_bool = causal_mask.unsqueeze(0).expand(B, L, L).clone() # (B, L, L)
         

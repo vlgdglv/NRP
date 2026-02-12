@@ -7,10 +7,10 @@ import torch
 import argparse
 from transformers import Trainer, TrainingArguments
 
-from data.dataset import TokenDataset, ImageRowCollator
-from model.base_model import load_lumina_with_lora, load_emu3_with_lora
+from data import TokenDataset, ImageRowCollator, JanusImageRowCollator
+from model.base_model import load_lumina_with_lora, load_emu3_with_lora, load_janus_with_lora
 from model.modeling_draft import RowExpertModel
-from model import lumina_img_token_config, emu3_img_token_config
+from model import lumina_img_token_config, emu3_img_token_config, janus_img_token_config
 
 from utils.logger import get_logger
 
@@ -64,7 +64,7 @@ def train(args):
             model_path=model_path,
             device=device,
             lora_rank=lora_rank, 
-            lora_alpha=lora_alpha
+            lora_alpha=lora_alpha,
         )
         img_token_config = lumina_img_token_config
     elif model_name == "emu3":
@@ -75,6 +75,13 @@ def train(args):
             lora_alpha=lora_alpha
         )
         img_token_config = emu3_img_token_config
+    elif model_name == "janus":
+        base_model = load_janus_with_lora(
+            model_path=model_path,
+            lora_rank=lora_rank, 
+            lora_alpha=lora_alpha
+        )
+        # img_token_config = janus_img_token_config
     else:
         raise NotImplementedError
     
@@ -91,9 +98,14 @@ def train(args):
         kd_temp=args.kd_temp        
     )
     
-    model.base_model.config.use_cache = False
-    model.base_model.gradient_checkpointing_enable()
-    model.base_model.enable_input_require_grads()
+    if model_name == "janus":
+        model.base_model.language_model.config.use_cache = False
+        model.base_model.language_model.gradient_checkpointing_enable()
+        model.base_model.language_model.enable_input_require_grads()
+    else:
+        model.base_model.config.use_cache = False
+        model.base_model.gradient_checkpointing_enable()
+        model.base_model.enable_input_require_grads()
 
     dataset_cfg = normalize_dataset_cfg(args)
     train_dataset = TokenDataset(
@@ -106,15 +118,23 @@ def train(args):
         # end_idx=10000,
     )
 
-    assert args.block_size+1 == image_width, "Do not support block-wise prediction in single row." 
-    collator = ImageRowCollator(
-        image_width=image_width, 
-        image_height=image_height, 
-        use_standard_causal=use_standard_causal, 
-        block_size=args.block_size,
-        use_teacher=args.use_teacher,
-        **img_token_config,
-    )
+    if model_name == "janus":
+        collator = JanusImageRowCollator(
+            image_width=image_width, 
+            image_height=image_height, 
+            use_standard_causal=use_standard_causal,
+            use_teacher=args.use_teacher,
+        )
+    else:
+        # assert args.block_size+1 == image_width, "Do not support block-wise prediction in single row." 
+        collator = ImageRowCollator(
+            image_width=image_width, 
+            image_height=image_height, 
+            use_standard_causal=use_standard_causal, 
+            block_size=args.block_size,
+            use_teacher=args.use_teacher,
+            **img_token_config,
+        )
     
     training_args = TrainingArguments(
         output_dir=output_dir,

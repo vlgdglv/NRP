@@ -157,8 +157,8 @@ def load_janus_with_lora(
             f"Original error: {type(e).__name__}: {e}"
         ) from e
 
-    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    print(type(cfg), cfg.__class__.__name__)
+    # cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    # print(type(cfg), cfg.__class__.__name__)
 
     model = MultiModalityCausalLM.from_pretrained(
         model_path,
@@ -166,7 +166,7 @@ def load_janus_with_lora(
         device_map=None,
         trust_remote_code=True
     )
-
+    
     peft_config = LoraConfig(
         r=lora_rank,
         lora_alpha=lora_alpha,
