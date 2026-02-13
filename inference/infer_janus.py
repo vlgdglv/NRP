@@ -8,7 +8,7 @@ from model.janus_arch.models import MultiModalityCausalLM, VLChatProcessor
 from inference.janus.generation import build_prompt, generate, gererate_row_parallel, decode_image
 import numpy as np
 import os, time
-import PIL.Image
+from peft import PeftModel
 
 from utils.logger import get_logger
 logger = get_logger(__name__)
@@ -92,22 +92,32 @@ if __name__ == "__main__":
         current_time = datetime.now().strftime('%Y-%m-%d_%H-%M')
         folder_name = f"{current_time}"
     save_dir = os.path.join(args.save_dir, folder_name)
-
+    
     vl_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(vl_processor_path)
     tokenizer = vl_chat_processor.tokenizer
-    print("PAD ID", vl_chat_processor.pad_id)
     vl_gpt: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
         model_path, trust_remote_code=True
     )
+    
+    if args.lora_path is not None:
+        vl_gpt = PeftModel.from_pretrained(
+            vl_gpt,
+            args.lora_path
+        )
+        print("model type:", type(vl_gpt))
+        print("has peft_config:", hasattr(vl_gpt, "peft_config"))
+        print("peft_config:", getattr(vl_gpt, "peft_config", None))
+
+        
     vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
 
     gen_kwargs = dict(
         parallel_size=1,
-        
         img_size=target_size,
         patch_size=patch_size,
     )
-    print(args.cfg_guidance_scale)
+    
+
     for idx, desc in enumerate(image_content_prompts):
         prompt = build_prompt(desc, vl_chat_processor)
         base = slugify_first_words(desc, n=6)

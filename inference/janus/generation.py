@@ -140,37 +140,38 @@ def gererate_row_parallel(
     pos_cur = L_prefill
 
     prev_row_embs = []
-    for c in range(image_width * ar_rows):
-        if c > 0:
-            ones = torch.ones((input_embeddings.shape[0], 1), dtype=torch.int32, device="cuda")
-            attention_mask = torch.cat([attention_mask, ones], dim=1)
+    with mmgpt.disable_adapter():
+        for c in range(image_width * ar_rows):
+            if c > 0:
+                ones = torch.ones((input_embeddings.shape[0], 1), dtype=torch.int32, device="cuda")
+                attention_mask = torch.cat([attention_mask, ones], dim=1)
 
-        out = mmgpt.language_model.model(
-            inputs_embeds=input_embeddings,
-            use_cache=True,
-            attention_mask=attention_mask,
-            past_key_values=past,
-        )
-        hidden_states, past = out.last_hidden_state, out.past_key_values
-        logits = mmgpt.gen_head(hidden_states[:, -1, :])
-        logits = cfg_merge(logits, cfg_weight)
-        probs = torch.softmax(logits / temperature, dim=-1)
-        if do_sample:    
-            nxt = torch.multinomial(probs, num_samples=1, generator=generator).squeeze(0)
-        else:
-            nxt = probs.argmax(dim=-1, keepdim=True)
-        
-        token_id = int(nxt)
-        generated_tokens[c] = token_id
-        gt_tokens.append(token_id)
+            out = mmgpt.language_model.model(
+                inputs_embeds=input_embeddings,
+                use_cache=True,
+                attention_mask=attention_mask,
+                past_key_values=past,
+            )
+            hidden_states, past = out.last_hidden_state, out.past_key_values
+            logits = mmgpt.gen_head(hidden_states[:, -1, :])
+            logits = cfg_merge(logits, cfg_weight)
+            probs = torch.softmax(logits / temperature, dim=-1)
+            if do_sample:    
+                nxt = torch.multinomial(probs, num_samples=1, generator=generator).squeeze(0)
+            else:
+                nxt = probs.argmax(dim=-1, keepdim=True)
+            
+            token_id = int(nxt)
+            generated_tokens[c] = token_id
+            gt_tokens.append(token_id)
 
-        tok_emb = mmgpt.prepare_gen_img_embeds(torch.tensor([token_id, token_id], device="cuda").view(-1))       # [2, D]
-        input_embeddings = tok_emb.unsqueeze(1)                      # [2,1,D]
+            tok_emb = mmgpt.prepare_gen_img_embeds(torch.tensor([token_id, token_id], device="cuda").view(-1))       # [2, D]
+            input_embeddings = tok_emb.unsqueeze(1)                      # [2,1,D]
 
-        
-        prev_row_embs.append(tok_emb[0].detach())
+            
+            prev_row_embs.append(tok_emb[0].detach())
 
-        pos_cur += 1
+            pos_cur += 1
 
     prev_row_embs = prev_row_embs[-image_width:]
     # prev_row_embs.insert(0, prev_row_embs.pop())
