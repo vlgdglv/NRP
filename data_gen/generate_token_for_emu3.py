@@ -1,4 +1,6 @@
 import os, sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import argparse
 from pathlib import Path
 import torch
@@ -41,30 +43,30 @@ NEGATIVE_PROMPT = "lowres, bad anatomy, bad hands, text, error, missing fingers,
 
 
 if __name__ == "__main__":
-    
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--begin", type=int, default=0, help="Start index for sampling")
     parser.add_argument("--end", type=int, default=1000, help="End index for sampling (None means to the end)")
     parser.add_argument("--split", type=str, default="train", help="train or val")
-    parser.add_argument("--save_dir", type=str, default="datasets/COCO_Emu3_tokens_for_train/", help="Save directory")
+    parser.add_argument("--save_dir", type=str, default="datasets/emu3-mscoco-train2017-tokens/COCO_Emu3_tokens_for_train", help="Save directory")
     args = parser.parse_args()
     
     save_stats_dir = Path(args.save_dir)
     save_stats_dir.mkdir(parents=True, exist_ok=True)
     
-    with open(f"/home/ffc3/bht/GSD/eval_coco/coco_data/coco2017_{args.split}_prompts.json", "r") as f:
+    with open(f"datasets/coco2017_train_prompts.json", "r") as f:
         all_prompts = json.load(f)
     # N_SAMPLE = 800
     # N_SAMPLE = len(all_prompts)
     all_prompts = all_prompts[args.begin : args.end]
-    
-    emu_model_path = "/home/ffc3/bht/model_home/Emu3-Gen/"
-    emu_vq_model_path = "/home/ffc3/bht/model_home/Emu3-VisionTokenizer/"
+
+    emu_model_path = "/jizhicfs/pkuhetu/bht/model_home//Emu3-Gen/"
+    emu_vq_model_path = "/jizhicfs/pkuhetu/bht/model_home/Emu3-VisionTokenizer/"
     device = "cuda:0"
     max_new_tokens = 8192
-    image_top_k = args.image_top_k
+    image_top_k = 1024
     cfg_guidance_scale = 3.0
+    decode_img = False
     
     model = AutoModelForCausalLM.from_pretrained(
         emu_model_path,
@@ -89,14 +91,14 @@ if __name__ == "__main__":
         do_sample=True,
         top_k=image_top_k,
     )
-
-    sampler = Emu3Sampler(model, tokenizer)
     
+    sampler = Emu3Sampler(model, tokenizer)
+    total_valid_samples = 0
     for offset, item in tqdm(enumerate(all_prompts), total=len(all_prompts), desc="Collecting Stats"):
         idx = offset + args.begin
         caption = item["caption"]
         
-        mm_list, time_uesd, tokens = batched_cfg_sample(
+        returns = batched_cfg_sample(
             caption + POSITIVE_PROMPT,
             NEGATIVE_PROMPT,
             model,
@@ -108,15 +110,20 @@ if __name__ == "__main__":
             pad_token_id=model.config.pad_token_id,
             max_new_tokens=max_new_tokens,
             seed=SEED,
-            return_tokens=True
+            return_tokens=True,
+            do_decode_image=decode_img
         )
         
-        for img in mm_list:
-            if isinstance(img, Image.Image):
-                result_image = img
-                break
+        if decode_img:
+            mm_list, time_uesd, tokens = returns
+            for img in mm_list:
+                if isinstance(img, Image.Image):
+                    result_image = img
+                    break
+            result_image.save(os.path.join(save_stats_dir, "image_sample_{}.png".format(idx)))
+        else:
+            tokens, time_uesd = returns
         
-        result_image.save(os.path.join(save_stats_dir, "image_sample_{}.png".format(idx)))
         print("Sample", idx, " token shape: ", tokens.shape)
         data_load = {
             # "hidden_states": hidden_states,

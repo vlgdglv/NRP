@@ -1,4 +1,4 @@
-# coding=utf-8
+# coding=utf-8
 # Copyright 2024 The Emu team, BAAI and The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

@@ -1,17 +1,19 @@
 import os, sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import argparse
 import gc
 import math
 from PIL import Image
 import PIL.Image
 import torch
-import time
+from peft import PeftModel
 
 from datetime import datetime
 import random
 import numpy as np
 
-from inference.emu3.emu3_generation import Emu3Sampler, batched_cfg_sample, unbatched_cfg_sample
+from inference.emu3.emu3_generation import Emu3Sampler, Emu3RowParallelSampler, batched_cfg_sample, unbatched_cfg_sample
 from utils.logger import get_logger
 
 from model.emu3_arch.mllm.processing_emu3 import Emu3Processor
@@ -76,9 +78,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="inference_outputs/emu3")
     parser.add_argument("--save_name", type=str, default=None)
-    parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Emu3-Gen/")
-    parser.add_argument("--vq_model_path", type=str, default="/home/ffc3/bht/model_home/Emu3-VisionTokenizer/")
+    parser.add_argument("--model_path", type=str, default="/jizhicfs/pkuhetu/bht/model_home//Emu3-Gen/")
+    parser.add_argument("--vq_model_path", type=str, default="/jizhicfs/pkuhetu/bht/model_home/Emu3-VisionTokenizer/")
     parser.add_argument("--image_area", type=int, default=720*720)
+    parser.add_argument("--latent_width", type=int, default=91)
+    parser.add_argument("--latent_height", type=int, default=90)
     parser.add_argument("--dtype", type=str, default="bf16")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42])
     parser.add_argument("--max_new_tokens", type=int, default=8192)
@@ -101,11 +105,6 @@ if __name__ == "__main__":
     image_top_k = args.image_top_k
     cfg_guidance_scale = args.cfg_guidance_scale
     
-    row_parallel = args.row_parallel
-    lora_path = None
-    if row_parallel and args.lora_path is not None:
-        lora_path = args.lora_path
-
     # Load models
     model = Emu3ForCausalLM.from_pretrained(
         emu_model_path,
@@ -115,6 +114,18 @@ if __name__ == "__main__":
         trust_remote_code=True,
     )
     model.eval()
+    
+    row_parallel = args.row_parallel
+    lora_path = None
+    if row_parallel and args.lora_path is not None:
+        lora_path = args.lora_path
+        model = PeftModel.from_pretrained(
+            model,
+            lora_path,
+            torch_dtype=torch.bfloat16,
+            device_map=device,
+        )
+
     tokenizer = AutoTokenizer.from_pretrained(emu_model_path, trust_remote_code=True, padding_side="left")
     image_processor = AutoImageProcessor.from_pretrained(emu_vq_model_path, trust_remote_code=True)
     image_tokenizer = AutoModel.from_pretrained(emu_vq_model_path, device_map=device, torch_dtype=torch.bfloat16, trust_remote_code=True).eval()
@@ -130,7 +141,18 @@ if __name__ == "__main__":
         top_k=image_top_k,
     )
 
-    sampler = Emu3Sampler(model, tokenizer)
+    if row_parallel:
+        sampler = Emu3RowParallelSampler(
+            model,
+            tokenizer,
+            image_start_token=151851, # starter of visual token
+            image_end_token=151847,
+            image_end_line_token=151846,
+            latent_width=args.latent_width,
+            latent_height=args.latent_height,
+        )
+    else:
+        sampler = Emu3Sampler(model, tokenizer)
 
     if args.save_name is not None:
         folder_name = args.save_name
@@ -163,7 +185,7 @@ if __name__ == "__main__":
                     image_area,
                     pad_token_id=model.config.pad_token_id,
                     max_new_tokens=max_new_tokens,
-                    seed=seed
+                    seed=seed,
                 )
             else:
                 mm_list, time_uesd = unbatched_cfg_sample(
