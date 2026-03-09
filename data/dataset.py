@@ -65,8 +65,8 @@ class TokenDataset(Dataset):
         if use_teacher:
             self.teacher_samples = []
         # files = sorted(glob.glob(os.path.join(data_dir, f"*{file_ext}")), key=lambda x: int(os.path.basename(x).split("_")[-1].split(".")[0]))
-        if start_idx != -1 and end_idx != -1:
-            files = files[start_idx:end_idx]
+        # if start_idx != -1 and end_idx != -1:
+        #     files = files[start_idx:end_idx]
 
         def _idx_key(path: str) -> int:
             base = os.path.basename(path)

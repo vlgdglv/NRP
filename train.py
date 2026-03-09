@@ -175,7 +175,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Lumina-mGPT-7B-768")
     parser.add_argument("--dataset_name", type=str, nargs="+", default=["COCO"])
     parser.add_argument("--data_path", type=str, nargs="+", default=["/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train"])
-    parser.add_argument("--teacher_data_dir", type=str, default="/home/ffc3/bht/NRP/datasets/COCO_Lumina7B_training")
+    parser.add_argument("--teacher_data_dir", type=str, nargs="+", default=["/home/ffc3/bht/NRP/datasets/COCO_Lumina7B_training"])
     parser.add_argument("--output_dir", type=str, default="training_outputs/lumina")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--block_size", type=int, default=48)

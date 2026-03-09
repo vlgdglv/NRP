@@ -20,7 +20,7 @@ def run_offline_inference(
     save_dir,
     image_width=48+1,
     image_height=48,
-    batch_size=4,
+    batch_size=2,
     top_k=20,
     start_idx=-1,
     end_idx=-1
@@ -84,9 +84,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Lumina-mGPT-7B-768")
     parser.add_argument("--data_path", type=str, default="/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train")
-    parser.add_argument("--save_dir", type=str, default="/home/ffc3/bht/NRP/datasets/COCO_Lumina7B_training")
-    parser.add_argument("--topk", type=int, default=8)
-    parser.add_argument("--start", type=int, default=-1)
+    parser.add_argument("--save_dir", type=str, default="/home/ffc3/bht/NRP/datasets/COCO_Lumina7B_training_teacher")
+    parser.add_argument("--topk", type=int, default=16)
+    parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=-1)
     
     args = parser.parse_args()

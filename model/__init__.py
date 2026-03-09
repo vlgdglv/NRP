@@ -35,18 +35,19 @@ lumina_img_token_config = {
     "token_check_func": check_image_for_lumina
 }
 
+# emu3_img_token_config = {
+#     "eoi_token_id": 151847,
+#     "boi_token_id": 151852,
+#     "eol_token_id": 151846,
+#     "eos_token_id": 151853,
+#     "img_token_id": -1,
+#     "token_check_func": check_image_for_emu3
+# }
+
 emu3_img_token_config = {
     "eoi_token_id": 151847,
-    "boi_token_id": 151852,
-    "eol_token_id": 151846,
-    "eos_token_id": 151853,
-    "img_token_id": -1,
-    "token_check_func": check_image_for_emu3
-}
-
-janus_img_token_config = {
-    "eoi_token_id": 151847,
-    "boi_token_id": 151852,
+    "boi_token_id": 151852, # starter of image seqeunce
+    "img_token_id": 151851, # starter of visual token
     "eol_token_id": 151846,
     "eos_token_id": 151853,
     "img_token_id": -1,
