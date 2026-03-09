@@ -5,8 +5,10 @@ lora_name=$1
 save_name=$2
 
 CUDA_VISIBLE_DEVICES=7 python inference/infer_emu3.py \
-    --save_name rk32_ce_e5_bs1_ar1 --batched_cfg \
-    --row_parallel --lora_path training_outputs/emu3/rk32_ce_e5_bs1
+    --save_name rk64_lm_ce_e5_ar1 --batched_cfg  --ar_rows 12 \
+    --row_parallel --lora_path training_outputs/emu3/rk64_lm_ce_e5
+
+CUDA_VISIBLE_DEVICES=7 python inference/infer_emu3.py --save_name baseline --batched_cfg
 
 CUDA_VISIBLE_DEVICES=7 python inference/infer_emu3.py     --save_name baseline --batched_cfg 
 

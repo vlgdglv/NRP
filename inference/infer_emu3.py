@@ -92,6 +92,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--batched_cfg", action="store_true")
     parser.add_argument("--row_parallel", action="store_true")
+    parser.add_argument("--ar_rows", type=int, default=1)
     parser.add_argument("--do_warmup", type=int, default=1)
     parser.add_argument("--infer_count", type=int, default=-1, help="number of inference")
     parser.add_argument("--draft_use_causal_mask", action="store_true")
@@ -104,6 +105,7 @@ if __name__ == "__main__":
     max_new_tokens = args.max_new_tokens
     image_top_k = args.image_top_k
     cfg_guidance_scale = args.cfg_guidance_scale
+    ar_rows = args.ar_rows
     
     # Load models
     model = Emu3ForCausalLM.from_pretrained(
@@ -186,6 +188,7 @@ if __name__ == "__main__":
                     pad_token_id=model.config.pad_token_id,
                     max_new_tokens=max_new_tokens,
                     seed=seed,
+                    ar_rows=ar_rows,
                 )
             else:
                 mm_list, time_uesd = unbatched_cfg_sample(
@@ -198,7 +201,8 @@ if __name__ == "__main__":
                     cfg_guidance_scale,
                     image_area,
                     max_new_tokens=max_new_tokens,
-                    seed=seed
+                    seed=seed,
+                    ar_rows=ar_rows,
                 )
 
             for img in mm_list:

@@ -49,6 +49,7 @@ def unbatched_cfg_sample(
     image_area: int,
     max_new_tokens: int,
     seed: int,
+    ar_rows: int = 1,
     do_decode_image: bool = True,
     return_tokens: bool = False
 ):
@@ -133,6 +134,7 @@ def batched_cfg_sample(
     pad_token_id: int,
     max_new_tokens: int,
     seed: int,
+    ar_rows: int = 1,
     do_decode_image: bool = True,
     return_tokens: bool = False,
 ):
@@ -241,6 +243,7 @@ def batched_cfg_sample(
             is_uncond_provided=True,
             position_ids=batch_position_ids.to(device),
             real_lens=batch_real_lens.to(device),
+            ar_rows=ar_rows
         )
         
     if do_decode_image:
@@ -346,7 +349,7 @@ class Emu3Sampler(SamplerEngine):
     ):
         position_ids = kwargs["position_ids"] if "position_ids" in kwargs else None
         # print("Attention mask in sampler: ", attention_mask)
-        # print("position_ids in sampler: ", position_ids)
+        print("position_ids in sampler: ", position_ids)
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -425,7 +428,7 @@ class Emu3RowParallelSampler(Emu3Sampler):
         is_uncond_provided: bool = False,
         seed: int = None,
         use_cache: bool = True,
-        ar_rows: int = 40,
+        ar_rows: int = 12,
         parallel_as_draft: bool = False,
         draft_use_bi_mask: bool = True,
         block_size: int = 90,
@@ -439,6 +442,8 @@ class Emu3RowParallelSampler(Emu3Sampler):
         if seed is not None:
             set_seed(seed)
             self.generator = torch.Generator(device).manual_seed(seed)
+        else:
+            self.generator = None
 
         # Preparse everything
         input_ids = input_ids.contiguous()
@@ -452,7 +457,6 @@ class Emu3RowParallelSampler(Emu3Sampler):
         past_key_values = DynamicCache() if use_cache else None
         # past_key_values = None
         
-        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
         
@@ -466,7 +470,7 @@ class Emu3RowParallelSampler(Emu3Sampler):
                 attention_mask = attention_mask.repeat(2, 1)
                 attention_mask[1::2,  :prefill_length - 1] = 0
 
-        ar_row_done = False
+        real_lens = kwargs["real_lens"] if "real_lens" in kwargs else None
         generated_hidden_states, generated_tokens = [], []
         
         with self.model.disable_adapter():
@@ -481,7 +485,8 @@ class Emu3RowParallelSampler(Emu3Sampler):
                     do_sample,
                     do_cfg,
                     cfg_scale,
-                    is_prefill
+                    is_prefill,
+                    **kwargs
                 )
                 past_key_values = outputs.past_key_values
                 generated_hidden_states.append(outputs.logits[:, -1:, :])
@@ -495,12 +500,17 @@ class Emu3RowParallelSampler(Emu3Sampler):
                 attention_mask = torch.cat([attention_mask, ones], dim=-1)
 
                 is_prefill = False if is_prefill else False
-                
+
+                if real_lens is not None and "position_ids" in kwargs:
+                    real_lens += next_token.shape[-1]
+                    position_ids = real_lens.view(real_lens.shape[0], 1) - 1 
+                    kwargs["position_ids"] = position_ids
+                    
                 img_pos_info = self._get_decoding_position(token_sequence)
 
                 if img_pos_info["is_in_image"]:
-                    if img_pos_info["is_end_of_line"]:
-                        print(img_pos_info["num_of_lines"], ar_rows, token_sequence.shape)
+                    # if img_pos_info["is_end_of_line"]:
+                    #     print(img_pos_info["num_of_lines"], ar_rows, token_sequence.shape)
                     if img_pos_info["is_end_of_line"] and img_pos_info["num_of_lines"] >= ar_rows:
                         
                         ar_row_done = True
@@ -520,7 +530,6 @@ class Emu3RowParallelSampler(Emu3Sampler):
         assert self.img_h is not None and self.img_w is not None
         remain_rows = self.img_h - ar_rows
         
-
         # assert self.img_w % block_size == 0, f"Image width {self.img_w} is not divisible by block_size"
         num_blocks_per_row = self.img_w // block_size
 
@@ -529,7 +538,9 @@ class Emu3RowParallelSampler(Emu3Sampler):
             for blocks in range(num_blocks_per_row):
                 input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
                 ones = torch.ones(input_ids.shape[0], input_ids.shape[1], dtype=torch.long, device=input_ids.device)
-                print(input_ids.shape, ones.shape, attention_mask.shape)                
+                position_ids = real_lens.view(2, 1) - 1 + torch.arange(self.img_w+1, dtype=torch.long, device=input_ids.device)
+                # print("position_ids in parallel: ", position_ids)
+                # print(input_ids.shape, ones.shape, attention_mask.shape)                
                 attention_mask = torch.cat([attention_mask, ones], dim=-1)
 
                 if draft_use_bi_mask:
@@ -544,6 +555,7 @@ class Emu3RowParallelSampler(Emu3Sampler):
                     attention_mask=mask4d if draft_use_bi_mask else attention_mask,
                     use_cache=True,
                     return_dict=True,
+                    position_ids=position_ids,
                 )
                 blk_logits = blk_output.logits
                 
@@ -574,12 +586,15 @@ class Emu3RowParallelSampler(Emu3Sampler):
                     next_blk_token = torch.argmax(scores, dim=-1, keepdim=True)
 
                 token_sequence = torch.cat([token_sequence, next_blk_token], dim=-1)
+                real_lens += next_blk_token.shape[-1]
+
                 # input_ids = next_blk_token
         # Ending: ensure sample is finished
         input_ids = token_sequence[:, -1]
         input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
         ones = torch.ones(input_ids.shape[0],  input_ids.shape[1], dtype=torch.long, device=input_ids.device)
         attention_mask = torch.cat([attention_mask, ones], dim=-1)
+        kwargs["position_ids"] = real_lens.view(real_lens.shape[0], 1) - 1
 
         with self.model.disable_adapter():
             while True:
@@ -594,12 +609,17 @@ class Emu3RowParallelSampler(Emu3Sampler):
                     do_cfg,
                     cfg_scale,
                     is_prefill=False,
+                    **kwargs,
                 )
                 past_key_values = outputs.past_key_values
                 token_sequence = torch.cat([token_sequence, next_token], dim=-1)
                 input_ids = next_token.repeat(2, 1) if do_cfg else next_token
                 ones = torch.ones(input_ids.shape[0], input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
                 attention_mask = torch.cat([attention_mask, ones], dim=-1)
+                if real_lens is not None and "position_ids" in kwargs:
+                    real_lens += next_token.shape[-1]
+                    position_ids = real_lens.view(real_lens.shape[0], 1) - 1 
+                    kwargs["position_ids"] = position_ids
                 if (next_token.item() == eos_token_id) or (token_sequence.shape[-1] == max_length):
                     break
         
