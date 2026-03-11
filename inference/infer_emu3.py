@@ -80,7 +80,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_name", type=str, default=None)
     parser.add_argument("--model_path", type=str, default="/jizhicfs/pkuhetu/bht/model_home//Emu3-Gen/")
     parser.add_argument("--vq_model_path", type=str, default="/jizhicfs/pkuhetu/bht/model_home/Emu3-VisionTokenizer/")
-    parser.add_argument("--image_area", type=int, default=720*720)
+    parser.add_argument("--image_area", type=int, default=None)
     parser.add_argument("--latent_width", type=int, default=91)
     parser.add_argument("--latent_height", type=int, default=90)
     parser.add_argument("--dtype", type=str, default="bf16")
@@ -133,7 +133,7 @@ if __name__ == "__main__":
     image_tokenizer = AutoModel.from_pretrained(emu_vq_model_path, device_map=device, torch_dtype=torch.bfloat16, trust_remote_code=True).eval()
     processor = Emu3Processor(image_processor, image_tokenizer, tokenizer)
 
-    image_area = model.config.image_area
+    image_area = model.config.image_area if args.image_area is None else args.image_area
     generation_config = GenerationConfig(
         use_cache=True,
         eos_token_id=model.config.eos_token_id,
