@@ -14,7 +14,7 @@ from peft import PeftModel
 
 from inference.lumina.data.item_processor import FlexARItemProcessor
 from model.lumina_arch.chameleon import ChameleonForConditionalGeneration
-from inference.sampler import SamplerEngine, RowParallelSampler
+from inference.sampler import SamplerEngine, RowParallelSampler, RowParallelSamplerTester
 
 
 def get_token_row(token_idx, row_len):
@@ -328,7 +328,8 @@ class FlexARInferenceSolver:
             print("has peft_config:", hasattr(lora_model, "peft_config"))
             print("peft_config:", getattr(lora_model, "peft_config", None))
 
-            self.sampler = RowParallelSampler(
+            self.sampler = RowParallelSamplerTester(
+            # self.sampler = RowParallelSampler(
             # self.sampler = RowParallelWithVerifySampler(
                 lora_model,
                 self.item_processor.tokenizer,

@@ -5,7 +5,7 @@ ar_rows=$4
 
 # conda activate gsd310
 
-CUDA_VISIBLE_DEVICES=7 python inference/infer_lumina.py \
+CUDA_VISIBLE_DEVICES=0 python -m inference.infer_lumina \
     --row_parallel \
     --lora_path training_outputs/lumina/$test_lora_name \
     --save_name $save_name \

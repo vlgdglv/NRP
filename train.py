@@ -3,9 +3,9 @@ import os
 os.environ["NCCL_P2P_DISABLE"] = "1"
 os.environ["NCCL_IB_DISABLE"] = "1"
 
-import torch
 import argparse
 from transformers import Trainer, TrainingArguments
+from typing import Dict, Optional
 
 from data import TokenDataset, ImageRowCollator, JanusImageRowCollator
 from model.base_model import load_lumina_with_lora, load_emu3_with_lora, load_janus_with_lora
@@ -16,6 +16,37 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+
+class MyTrainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.custom_losses = {"steps": 0}
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        outputs = model(**inputs)
+        loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
+
+        if self.args.process_index == 0 and isinstance(outputs, dict):
+            for key, value in outputs.items():
+                if "loss" in key and key != "loss":
+                    val = value.item() if hasattr(value, "item") else value
+                    self.custom_losses[key] = self.custom_losses.get(key, 0.0) + val
+            
+            self.custom_losses["steps"] += 1
+
+        return (loss, outputs) if return_outputs else loss
+
+    def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
+        if self.args.process_index == 0 and self.custom_losses.get("steps", 0) > 0:
+            steps = self.custom_losses["steps"]
+            
+            for key, total_val in self.custom_losses.items():
+                if key != "steps":
+                    logs[f"train/{key}"] = total_val / steps
+            
+            self.custom_losses = {"steps": 0}
+
+        super().log(logs, start_time)
 
 def normalize_dataset_cfg(args):
     dataset_names = args.dataset_name
@@ -88,14 +119,18 @@ def train(args):
     losses = args.losses
     use_ce = True if "ce" in losses else False
     use_kd = True if "kd" in losses else False
+    use_tv = True if "tv" in losses else False
 
     model = RowExpertModel(
         base_model,
         use_ce=use_ce,
         ce_weight=args.ce_weight,
         use_kd=use_kd,
+        use_tv=use_tv,
         kd_weight=args.kd_weight,
-        kd_temp=args.kd_temp        
+        kd_temp=args.kd_temp,
+        tv_weight=args.tv_weight,
+        tv_temp=args.tv_temp,
     )
     
     if model_name == "janus":
@@ -157,7 +192,7 @@ def train(args):
         deepspeed=args.deepspeed
     )
 
-    trainer = Trainer(
+    trainer = MyTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -172,7 +207,7 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="lumina")
-    parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Lumina-mGPT-7B-768")
+    parser.add_argument("--model_path", type=str, default="/jizhicfs/pkuhetu/bht/model_home/Lumina-mGPT-7B-768")
     parser.add_argument("--dataset_name", type=str, nargs="+", default=["COCO"])
     parser.add_argument("--data_path", type=str, nargs="+", default=["/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train"])
     parser.add_argument("--teacher_data_dir", type=str, nargs="+", default=["/home/ffc3/bht/NRP/datasets/COCO_Lumina7B_training"])
@@ -188,10 +223,12 @@ if __name__ == "__main__":
     parser.add_argument("--image_height", type=int, default=48)
     parser.add_argument("--lora_rank", type=int, default=64)
     parser.add_argument("--lora_alpha", type=int, default=128)
-    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd"], )
+    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd", "tv"], )
     parser.add_argument("--ce_weight", type=float, default=1.0)
     parser.add_argument("--kd_weight", type=float, default=1.0)
     parser.add_argument("--kd_temp", type=float, default=1.0)
+    parser.add_argument("--tv_weight", type=float, default=1.0)
+    parser.add_argument("--tv_temp", type=float, default=1.0)
     parser.add_argument("--use_teacher", action="store_true")
     parser.add_argument("--use_standard_causal", action="store_true")
     parser.add_argument("--enable_wandb", action="store_true")

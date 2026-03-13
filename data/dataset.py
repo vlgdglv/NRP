@@ -20,7 +20,7 @@ class TokenDataset(Dataset):
         data_dir: str | list[str], 
         dataset_name: str | list[str] | None = None,
         file_ext: str = ".pt",
-        start_idx: int = -1,
+        start_idx: int = 0,
         end_idx: int = -1,
         use_teacher: bool = False,
         teacher_data_dir: str = None,
@@ -76,7 +76,7 @@ class TokenDataset(Dataset):
         for ds_i, (ds_name, ds_dir) in enumerate(dirs):
             files = sorted(glob.glob(os.path.join(ds_dir, f"*{file_ext}")), key=_idx_key)
 
-            if start_idx != -1 and end_idx != -1:
+            if start_idx != 0 and end_idx != -1:
                 files = files[start_idx:end_idx]
             
             loaded_this = 0
