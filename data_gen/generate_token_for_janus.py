@@ -33,7 +33,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     
-    dataset_home_dir = "/home/ffc3/bht/NRP/datasets"
+    dataset_home_dir = "/home/ffc3/bht/NRP/datasets/image_token_train_Janus"
     if args.dataset_name == "COCO":
         prompt_path = "/home/ffc3/bht/GSD/eval_coco/coco_data/coco2017_train_prompts.json"
         save_dir = os.path.join(dataset_home_dir, "COCO_Janus_tokens_for_train")
