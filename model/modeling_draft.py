@@ -10,10 +10,13 @@ class RowExpertModel(nn.Module):
         ce_weight: float = 1.0,
         use_kd: bool = True,
         use_tv: bool = True,
+        use_acc: bool = True,
         kd_weight: float = 1.0, 
         kd_temp: float = 1.0,
         tv_weight: float = 1.0, 
         tv_temp: float = 1.0,
+        acc_weight: float = 1.0, 
+        acc_temp: float = 1.0,
         
     ):
         super().__init__()
@@ -27,6 +30,8 @@ class RowExpertModel(nn.Module):
         self.use_tv = use_tv
         self.tv_weight = tv_weight
         self.tv_temp = tv_temp
+        self.acc_weight = acc_weight
+        self.acc_temp = acc_temp
         
     def forward(
         self, 
@@ -128,8 +133,20 @@ class RowExpertModel(nn.Module):
                 loss = loss + self.tv_weight * tv_loss
                 # print("tv_loss: ", tv_loss.item(), "tv_self: ", tv_self.item())
 
-            # if self.use_mse:
+            if self.use_acc:
+                invalid = -100
+                valid_mask = (labels != invalid)
+                student_logits = logits[valid_mask]
+                teacher_logits = teacher_logits[valid_mask]
+                T = float(self.acc_temp)
+                p_student = F.softmax(student_logits / T, dim=-1)
+                log_p_teacher = F.log_softmax(teacher_logits / T, dim=-1)
 
+                acc_loss = -(p_student * log_p_student).sum(dim=1).mean()
+
+                output_dict["acc_loss"] = acc_loss.detach()
+
+                loss = loss + self.acc_weight * acc_loss
         
 
         output_dict["loss"] = loss

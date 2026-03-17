@@ -120,6 +120,8 @@ def train(args):
     use_ce = True if "ce" in losses else False
     use_kd = True if "kd" in losses else False
     use_tv = True if "tv" in losses else False
+    use_acc = True if "acc" in losses else False
+    use_topk_cover = True if "topk_cover" in losses else False
 
     model = RowExpertModel(
         base_model,
@@ -127,10 +129,17 @@ def train(args):
         ce_weight=args.ce_weight,
         use_kd=use_kd,
         use_tv=use_tv,
+        use_acc=use_acc,
+        use_topk_cover=use_topk_cover,
         kd_weight=args.kd_weight,
         kd_temp=args.kd_temp,
         tv_weight=args.tv_weight,
         tv_temp=args.tv_temp,
+        acc_weight=args.acc_weight,
+        acc_temp=args.acc_temp,
+        topk_cover_weight=args.topk_cover_weight,
+        topk_cover_temp=args.topk_cover_temp,
+        topk_cover_topk=args.topk_cover_topk,
     )
     
     if model_name == "janus":
@@ -223,12 +232,17 @@ if __name__ == "__main__":
     parser.add_argument("--image_height", type=int, default=48)
     parser.add_argument("--lora_rank", type=int, default=64)
     parser.add_argument("--lora_alpha", type=int, default=128)
-    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd", "tv"], )
+    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd", "tv", "acc", "topk_cover"], )
     parser.add_argument("--ce_weight", type=float, default=1.0)
     parser.add_argument("--kd_weight", type=float, default=1.0)
     parser.add_argument("--kd_temp", type=float, default=1.0)
     parser.add_argument("--tv_weight", type=float, default=1.0)
     parser.add_argument("--tv_temp", type=float, default=1.0)
+    parser.add_argument("--acc_weight", type=float, default=1.0)
+    parser.add_argument("--acc_temp", type=float, default=1.0)
+    parser.add_argument("--topk_cover_weight", type=float, default=1.0)
+    parser.add_argument("--topk_cover_temp", type=float, default=1.0)
+    parser.add_argument("--topk_cover_topk", type=int, default=128)
     parser.add_argument("--use_teacher", action="store_true")
     parser.add_argument("--use_standard_causal", action="store_true")
     parser.add_argument("--enable_wandb", action="store_true")
