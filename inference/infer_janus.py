@@ -60,7 +60,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="inference_outputs/janus")
     parser.add_argument("--save_name", type=str, default=None)
-    parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Janus-Pro-7B/")
+    parser.add_argument("--model_path", type=str, default="/jizhicfs/pkuhetu/bht/model_home/Janus-Pro-7B/")
     parser.add_argument("--vl_processor_path", type=str, default=None)
     parser.add_argument("--target_size", type=int, default=384)
     parser.add_argument("--patch_size", type=int, default=16)

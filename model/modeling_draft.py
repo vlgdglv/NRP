@@ -8,16 +8,19 @@ class RowExpertModel(nn.Module):
         base_model,
         use_ce: bool = True,
         ce_weight: float = 1.0,
-        use_kd: bool = True,
-        use_tv: bool = True,
-        use_acc: bool = True,
+        use_kd: bool = False,
+        use_tv: bool = False,
+        use_acc: bool = False,
+        use_topk_cover: bool = False,
         kd_weight: float = 1.0, 
         kd_temp: float = 1.0,
         tv_weight: float = 1.0, 
         tv_temp: float = 1.0,
         acc_weight: float = 1.0, 
         acc_temp: float = 1.0,
-        
+        topk_cover_weight: float = 1.0,
+        topk_cover_temp: float = 1.0,
+        topk_cover_topk: int = 128,
     ):
         super().__init__()
         self.base_model = base_model
@@ -30,8 +33,15 @@ class RowExpertModel(nn.Module):
         self.use_tv = use_tv
         self.tv_weight = tv_weight
         self.tv_temp = tv_temp
+        self.use_acc = use_acc
         self.acc_weight = acc_weight
         self.acc_temp = acc_temp
+
+        self.use_topk_cover = use_topk_cover
+        self.topk_cover_weight = topk_cover_weight
+        self.topk_cover_temp = topk_cover_temp
+        self.topk_cover_topk = topk_cover_topk
+
         
     def forward(
         self, 
@@ -103,15 +113,12 @@ class RowExpertModel(nn.Module):
                     reduction="batchmean",
                 ) * (T * T)
                 output_dict["kd_loss"] = kd_loss.detach()
-                
                 loss = loss + self.kd_weight * kd_loss
-                
-                
-                kd_self = F.kl_div(
-                    p_teacher,
-                    p_teacher,
-                    reduction="batchmean",
-                ) * (T * T)
+                # kd_self = F.kl_div(
+                #     p_teacher,
+                #     p_teacher,
+                #     reduction="batchmean",
+                # ) * (T * T)
                 # print("kd_loss: ", kd_loss.item(), "kd_self: ", kd_self.item())
         
         
@@ -125,11 +132,8 @@ class RowExpertModel(nn.Module):
                 p_teacher = F.softmax(teacher_logits / T, dim=-1)
 
                 tv_loss = 0.5 * torch.abs(p_student - p_teacher).sum(dim=-1).mean()
-
-                tv_self = 0.5 * torch.abs(p_teacher - p_teacher).sum(dim=-1).mean()
-
+                # tv_self = 0.5 * torch.abs(p_teacher - p_teacher).sum(dim=-1).mean()
                 output_dict["tv_loss"] = tv_loss.detach()
-
                 loss = loss + self.tv_weight * tv_loss
                 # print("tv_loss: ", tv_loss.item(), "tv_self: ", tv_self.item())
 
@@ -143,11 +147,23 @@ class RowExpertModel(nn.Module):
                 log_p_teacher = F.log_softmax(teacher_logits / T, dim=-1)
 
                 acc_loss = -(p_student * log_p_student).sum(dim=1).mean()
-
                 output_dict["acc_loss"] = acc_loss.detach()
-
                 loss = loss + self.acc_weight * acc_loss
-        
+
+            if self.use_topk_cover :
+                invalid = -100
+                T =float(self.topk_cover_temp)
+                valid_mask = (labels != invalid)
+                student_logits = logits[valid_mask]
+                teacher_logits = teacher_logits[valid_mask]
+                topk_idx = torch.topk(teacher_logits, k=self.topk_cover_topk, dim=-1).indices
+                p_student = F.softmax(student_logits / T, dim=-1)
+                p_student_topk = torch.gather(p_student, dim=-1, index=topk_idx).sum(dim=-1)
+
+                topk_cover_loss = -torch.log(p_student_topk.clamp_min(1e-8)).mean()
+                output_dict["tpkc_loss"] = topk_cover_loss.detach()
+                loss = loss + self.topk_cover_weight * topk_cover_loss
+
 
         output_dict["loss"] = loss
         return output_dict

@@ -92,7 +92,7 @@ def generate(
         inputs_embeds = img_embeds.unsqueeze(dim=1)
     
     if include_prefill:
-        print(input_ids.shape, generated_tokens.shape)
+        # print(input_ids.shape, generated_tokens.shape)
         full_tokens = torch.cat([input_ids.unsqueeze(dim=0).to(generated_tokens), generated_tokens], dim=1)
         return generated_tokens, full_tokens 
     else:

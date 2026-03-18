@@ -27,26 +27,26 @@ if __name__ == "__main__":
     parser.add_argument("--end", type=int, default=1000, help="End index for sampling (None means to the end)")
     parser.add_argument("--split", type=str, default="train", help="train or val")
     parser.add_argument("--json_key", type=str, default="prompt")
-    # parser.add_argument("--prompt_path", type=str, default="/home/ffc3/bht/GSD/eval_coco/coco_data/coco2017_train_prompts.json") # datasets/midjourney_20k.json
+    # parser.add_argument("--prompt_path", type=str, default="/jizhicfs/pkuhetu/bht/GSD/eval_coco/coco_data/coco2017_train_prompts.json") # datasets/midjourney_20k.json
     parser.add_argument("--dataset_name", type=str, default="COCO")
     
     args = parser.parse_args()
     
     
-    dataset_home_dir = "/home/ffc3/bht/NRP/datasets/image_token_train_Janus"
+    dataset_home_dir = "/jizhicfs/pkuhetu/bht/NRP/datasets/image_token_train_Janus"
     if args.dataset_name == "COCO":
-        prompt_path = "/home/ffc3/bht/GSD/eval_coco/coco_data/coco2017_train_prompts.json"
-        save_dir = os.path.join(dataset_home_dir, "COCO_Janus_tokens_for_train")
+        prompt_path = "/jizhicfs/pkuhetu/bht/NRP/datasets/coco2017_train_prompts.json"
+        save_dir = os.path.join(dataset_home_dir, "COCO_Janus_tokens_for_train_raw_prompt")
     elif args.dataset_name == "laion":
-        prompt_path = "/home/ffc3/bht/NRP/datasets/laion_20k.json"
+        prompt_path = "/jizhicfs/pkuhetu/bht/NRP/datasets/laion_20k.json"
         save_dir = os.path.join(dataset_home_dir, "laion_Janus_tokens_for_train")
     elif args.dataset_name == "midjourney":
-        prompt_path = "/home/ffc3/bht/NRP/datasets/midjourney_20k.json"
+        prompt_path = "/jizhicfs/pkuhetu/bht/NRP/datasets/midjourney_20k.json"
         save_dir = os.path.join(dataset_home_dir, "midjourney_Janus_tokens_for_train")
     else:
         raise NotImplementedError
     
-    model_path = "/home/ffc3/bht/model_home/Janus-Pro-7B/"
+    model_path = "/jizhicfs/pkuhetu/bht/model_home/Janus-Pro-7B/"
     device = "cuda:0"
     cache_dir = ".cache"
     dtype = "bf16"
@@ -77,8 +77,9 @@ if __name__ == "__main__":
         idx = offset + args.begin
         prompt = item[args.json_key]
         
-        full_prompt_text = prompt
-        print(f"full_prompt_text: {full_prompt_text}")
+        full_prompt_text = build_prompt(prompt, vl_chat_processor)
+        # full_prompt_text = prompt
+        # print(f"full_prompt_text: {full_prompt_text}")
         time_start = time.time()
         torch.cuda.synchronize()
 
