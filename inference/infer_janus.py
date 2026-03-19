@@ -5,7 +5,7 @@ from datetime import datetime
 from transformers import AutoModelForCausalLM
 
 from model.janus_arch.models import MultiModalityCausalLM, VLChatProcessor
-from inference.janus.generation import build_prompt, generate, gererate_row_parallel, decode_image
+from inference.janus.generation import build_prompt, generate, gererate_row_parallel, decode_image, gererate_row_parallel_with_probe
 import numpy as np
 import os, time
 from peft import PeftModel
@@ -60,7 +60,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="inference_outputs/janus")
     parser.add_argument("--save_name", type=str, default=None)
-    parser.add_argument("--model_path", type=str, default="/jizhicfs/pkuhetu/bht/model_home/Janus-Pro-7B/")
+    parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Janus-Pro-7B/")
     parser.add_argument("--vl_processor_path", type=str, default=None)
     parser.add_argument("--target_size", type=int, default=384)
     parser.add_argument("--patch_size", type=int, default=16)
@@ -74,6 +74,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--do_decode", action="store_true")
     parser.add_argument("--row_parallel", action="store_true")
+    parser.add_argument("--with_probe", action="store_true")
     parser.add_argument("--do_warmup", type=int, default=1)
     parser.add_argument("--ar_rows", type=int, default=1)
     parser.add_argument("--infer_count", type=int, default=-1, help="number of inference")
@@ -124,12 +125,21 @@ if __name__ == "__main__":
 
         t0 = time.perf_counter()
         if args.row_parallel:
-            token_sequence = gererate_row_parallel(
-                vl_gpt, vl_chat_processor, prompt, 
-                cfg_weight=args.cfg_guidance_scale,
-                ar_rows=args.ar_rows,
-                seed=42
-            )
+            
+            if not args.with_probe:
+                token_sequence = gererate_row_parallel(
+                    vl_gpt, vl_chat_processor, prompt, 
+                    cfg_weight=args.cfg_guidance_scale,
+                    ar_rows=args.ar_rows,
+                    seed=42
+                )
+            else:
+                token_sequence = gererate_row_parallel_with_probe(
+                    vl_gpt, vl_chat_processor, prompt, 
+                    cfg_weight=args.cfg_guidance_scale,
+                    ar_rows=args.ar_rows,
+                    seed=42
+                )
         else:
             token_sequence = generate(
                 vl_gpt, vl_chat_processor, prompt, 
