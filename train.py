@@ -122,6 +122,7 @@ def train(args):
     use_tv = True if "tv" in losses else False
     use_acc = True if "acc" in losses else False
     use_topk_cover = True if "topk_cover" in losses else False
+    use_mse = True if "mse" in losses else False
 
     model = RowExpertModel(
         base_model,
@@ -140,6 +141,10 @@ def train(args):
         topk_cover_weight=args.topk_cover_weight,
         topk_cover_temp=args.topk_cover_temp,
         topk_cover_topk=args.topk_cover_topk,
+        use_mse=use_mse,
+        mse_weight=args.mse_weight,
+        image_latent_width=image_width,
+        image_latent_height=image_height,
     )
     
     if model_name == "janus":
@@ -232,7 +237,7 @@ if __name__ == "__main__":
     parser.add_argument("--image_height", type=int, default=48)
     parser.add_argument("--lora_rank", type=int, default=64)
     parser.add_argument("--lora_alpha", type=int, default=128)
-    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd", "tv", "acc", "topk_cover"], )
+    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd", "tv", "acc", "topk_cover", "mse"], )
     parser.add_argument("--ce_weight", type=float, default=1.0)
     parser.add_argument("--kd_weight", type=float, default=1.0)
     parser.add_argument("--kd_temp", type=float, default=1.0)
@@ -243,6 +248,7 @@ if __name__ == "__main__":
     parser.add_argument("--topk_cover_weight", type=float, default=1.0)
     parser.add_argument("--topk_cover_temp", type=float, default=1.0)
     parser.add_argument("--topk_cover_topk", type=int, default=128)
+    parser.add_argument("--mse_weight", type=float, default=1.0)
     parser.add_argument("--use_teacher", action="store_true")
     parser.add_argument("--use_standard_causal", action="store_true")
     parser.add_argument("--enable_wandb", action="store_true")
