@@ -52,6 +52,9 @@ class RowExpertModel(nn.Module):
         self.image_latent_width = image_latent_width
         self.image_latent_height = image_latent_height
         self.offset = image_latent_width
+
+    def save_pretrained(self, output_dir):
+        self.base_model.save_pretrained(output_dir)
         
     def forward(
         self, 
