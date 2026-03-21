@@ -60,7 +60,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", type=str, default="inference_outputs/janus")
     parser.add_argument("--save_name", type=str, default=None)
-    parser.add_argument("--model_path", type=str, default="/home/ffc3/bht/model_home/Janus-Pro-7B/")
+    parser.add_argument("--model_path", type=str, default="/jizhicfs/pkuhetu/bht/model_home/Janus-Pro-7B/")
     parser.add_argument("--vl_processor_path", type=str, default=None)
     parser.add_argument("--target_size", type=int, default=384)
     parser.add_argument("--patch_size", type=int, default=16)
@@ -117,7 +117,10 @@ if __name__ == "__main__":
         img_size=target_size,
         patch_size=patch_size,
     )
+    summary_dict = {}
+    summary_dict["cnt"] = 0
     
+    anything_dict = None
 
     for idx, desc in enumerate(image_content_prompts):
         prompt = build_prompt(desc, vl_chat_processor)
@@ -134,12 +137,17 @@ if __name__ == "__main__":
                     seed=42
                 )
             else:
-                token_sequence = gererate_row_parallel_with_probe(
+                token_sequence, anything_dict = gererate_row_parallel_with_probe(
                     vl_gpt, vl_chat_processor, prompt, 
                     cfg_weight=args.cfg_guidance_scale,
                     ar_rows=args.ar_rows,
                     seed=42
                 )
+                for k, v in anything_dict.items():
+                    if k not in summary_dict.keys():
+                        summary_dict[k] = 0.0
+                    summary_dict[k] += v
+                summary_dict["cnt"] += 1
         else:
             token_sequence = generate(
                 vl_gpt, vl_chat_processor, prompt, 
@@ -156,4 +164,9 @@ if __name__ == "__main__":
             )
         dt = time.perf_counter() - t0
         logger.info(f"[{idx}] {base}  ->  {dt:.2f}s  | saved: {paths[0]}")
-       
+    
+    if anything_dict is not None:
+        for k, v in summary_dict.items():
+            if k != "cnt":
+                summary_dict[k] = summary_dict[k] / summary_dict["cnt"]
+        print(summary_dict)

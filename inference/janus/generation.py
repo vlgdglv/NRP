@@ -247,6 +247,8 @@ def gererate_row_parallel_with_probe(
 
     past = None
     pos_cur = L_prefill
+    
+    anything_dict = {}
 
     prev_row_embs = []
     with mmgpt.disable_adapter():
@@ -355,14 +357,18 @@ def gererate_row_parallel_with_probe(
     
 
     gt_ranks = torch.cat(gt_ranks, dim=-1).to(torch.float)
-    print("Mean gt rank: {:.4f}, Std: {:.4f}".format(gt_ranks.mean(), gt_ranks.std()))
+    # print("Mean gt rank: {:.4f}, Std: {:.4f}".format(gt_ranks.mean(), gt_ranks.std()))
     draft_ranks = torch.cat(draft_ranks, dim=-1).to(torch.float)
-    print("Mean draft rank: {:.4f}, Std: {:.4f}".format(draft_ranks.mean(), draft_ranks.std()))
-
+    # print("Mean draft rank: {:.4f}, Std: {:.4f}".format(draft_ranks.mean(), draft_ranks.std()))
+    anything_dict["gt_ranks.mean"] = gt_ranks.mean()
+    anything_dict["gt_ranks.std"] = gt_ranks.std()
+    anything_dict["draft_ranks.mean"] = draft_ranks.mean()
+    anything_dict["draft_ranks.std"] = draft_ranks.std()
+    
         # prev_row_embs = list(mmgpt.prepare_gen_img_embeds(proposal.unsqueeze(0).expand(2, -1))[0].unbind(dim=0))
         # final_row = proposal.clone()
     
         # for c in range(image_width):
         #     generated_tokens[r * image_width + c] = int(final_row[c])
 
-    return generated_tokens
+    return generated_tokens, anything_dict
