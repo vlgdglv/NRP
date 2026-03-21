@@ -513,6 +513,12 @@ class RowParallelSamplerTester(RowParallelSampler):
         block_size: int = 48,
         **kwargs
     ):
+        anything_dict = {}
+        if "return_anything_dict" in kwargs.keys() and kwargs["return_anything_dict"]:
+            return_anything_dict = kwargs["return_anything_dict"]
+        else:
+            return_anything_dict = False
+
         is_prefill = True
         device = input_ids.device
         prefill_length = input_ids.shape[-1]
@@ -729,9 +735,14 @@ class RowParallelSamplerTester(RowParallelSampler):
             draft_ranks.append(draft_rank)
 
         gt_ranks = torch.cat(gt_ranks, dim=-1).to(torch.float)
-        print("Mean gt rank: {:.4f}, Std: {:.4f}".format(gt_ranks.mean(), gt_ranks.std()))
+        # print("Mean gt rank: {:.4f}, Std: {:.4f}".format(gt_ranks.mean(), gt_ranks.std()))
         draft_ranks = torch.cat(draft_ranks, dim=-1).to(torch.float)
-        print("Mean draft rank: {:.4f}, Std: {:.4f}".format(draft_ranks.mean(), draft_ranks.std()))
+        # print("Mean draft rank: {:.4f}, Std: {:.4f}".format(draft_ranks.mean(), draft_ranks.std()))
+
+        anything_dict["gt_ranks.mean"] = float(gt_ranks.mean())
+        anything_dict["gt_ranks.std"] = float(gt_ranks.std())
+        anything_dict["draft_ranks.mean"] = float(draft_ranks.mean())
+        anything_dict["draft_ranks.std"] = float(draft_ranks.std())
 
         # Ending: ensure sample is finished
         input_ids = token_sequence[:, -1]
@@ -771,8 +782,10 @@ class RowParallelSamplerTester(RowParallelSampler):
             }, f"testing_fields/data_runtime/{RT_SAVE_NAME}/sample_{self.inner_cnt}.pt")
             logger.info(f"Row parallel states saved at sample_{self.inner_cnt}.pt., tokens: {generated_tokens.shape}, hidden_states: {generated_hidden_states.shape}")
 
-
-        return token_sequence
+        if return_anything_dict:
+            return token_sequence, anything_dict
+        else:
+            return token_sequence
 
 
 def build_row_bidirectional_mask(attn_mask, row_len):
