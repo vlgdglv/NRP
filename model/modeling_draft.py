@@ -21,7 +21,7 @@ class RowExpertModel(nn.Module):
         topk_cover_weight: float = 1.0,
         topk_cover_temp: float = 1.0,
         topk_cover_topk: int = 128,
-        use_mse: bool = True,
+        use_mse: bool = False,
         mse_weight: float = 1.0,
         image_latent_width: int = 49,
         image_latent_height: int = 48,
@@ -51,7 +51,7 @@ class RowExpertModel(nn.Module):
         
         self.image_latent_width = image_latent_width
         self.image_latent_height = image_latent_height
-        self.offset = image_latent_width
+        self.offset = image_latent_width - 1
         
     def forward(
         self, 
@@ -66,7 +66,7 @@ class RowExpertModel(nn.Module):
             input_ids=input_ids,
             attention_mask=attention_mask,
             use_cache=False,
-            output_hidden_states=False,
+            output_hidden_states=self.use_mse ,
         )
 
         logits = outputs.logits
@@ -103,9 +103,9 @@ class RowExpertModel(nn.Module):
                     with torch.no_grad():
                         teacher_outputs = self.base_model(
                             input_ids=input_ids,
-                            attention_mask=attention_mask,
+                            attention_mask=torch.ones_like(input_ids),
                             use_cache=False,
-                            output_hidden_states=False,
+                            output_hidden_states=self.use_mse,
                         )
                         teacher_logits = teacher_outputs.logits
                         if self.use_mse:
@@ -132,7 +132,6 @@ class RowExpertModel(nn.Module):
                 # s_logits_v = logits.view(-1, logits.size(-1))[valid_mask]
                 # t_indices_v = teacher_token.view(-1, teacher_token.size(-1))[valid_mask].long()
                 # t_values_v = teacher_logits.view(-1, teacher_logits.size(-1))[valid_mask]
-
                 # student_topk_logits = torch.gather(s_logits_v, dim=-1, index=t_indices_v)
 
                 T = float(self.kd_temp)
@@ -208,6 +207,7 @@ class RowExpertModel(nn.Module):
                 t_hidden_v = aligned_teacher_hidden[valid_mask]
                 
                 mse_loss = F.mse_loss(s_hidden_v, t_hidden_v)
+                # mse_loss = F.smooth_l1_loss(s_hidden_v, t_hidden_v, beta=1.0)
                 output_dict["mse_loss"] = mse_loss.detach()
                 loss = loss + self.mse_weight * mse_loss
 

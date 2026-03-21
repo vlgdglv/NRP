@@ -87,6 +87,7 @@ if __name__ == "__main__":
     parser.add_argument("--do_warmup", type=int, default=1)
     parser.add_argument("--infer_count", type=int, default=-1, help="number of inference")
     parser.add_argument("--draft_use_causal_mask", action="store_true")
+    parser.add_argument("--return_anything_dict", action="store_true")
     args = parser.parse_args()
     
     model_path = args.model_path
@@ -99,7 +100,8 @@ if __name__ == "__main__":
     text_top_k = args.text_top_k
     cfg_guidance_scale = args.cfg_guidance_scale
     ar_rows = args.ar_rows
-    
+    return_anything_dict = args.return_anything_dict
+    print("In main: ", return_anything_dict)
     row_parallel = args.row_parallel
     lora_path = None
     if row_parallel and args.lora_path is not None:
@@ -137,6 +139,8 @@ if __name__ == "__main__":
     else:
         total = args.prompt_end_idx - args.prompt_start_idx
 
+    summary_dict = {}
+    summary_dict["cnt"] = 0
     for seed in seeds:
         inference_solver.model.seed = seed
         for i, q_image_content_condition in enumerate(tqdm(prompts_iterator, total=total)):
@@ -172,7 +176,8 @@ if __name__ == "__main__":
                     seed=seed,
                     block_size=args.block_size,
                     draft_use_causal_mask=args.draft_use_causal_mask,
-                    ar_rows=ar_rows
+                    ar_rows=ar_rows,
+                    return_anything_dict=return_anything_dict
                 )
             t2.record()
             torch.cuda.synchronize()
@@ -183,6 +188,15 @@ if __name__ == "__main__":
             time_collector.append(time_uesd)
             logger.info(f"Image {i} generation time elapsed: {t:.2f} s (other timers: {time_uesd:.2f} s)")
 
+            if return_anything_dict:
+                generated, anything_dict = generated
+                for k, v in anything_dict.items():
+                    if k not in summary_dict.keys():
+                        summary_dict[k] = 0.0
+                    summary_dict[k] += v
+                summary_dict["cnt"] += 1
+                print(anything_dict)
+
             a1, new_image = generated[0], generated[1][0]
             result_image = inference_solver.create_image_grid([new_image], 1, 1)
             
@@ -192,6 +206,15 @@ if __name__ == "__main__":
                 result_image.save(os.path.join(save_dir, output_file_name))
                 logger.info(f"Saved at {output_file_name}") # <|image|>
     
+    if return_anything_dict:
+        for k, v in summary_dict.items():
+            if k != "cnt":
+                summary_dict[k] = summary_dict[k] / summary_dict["cnt"] 
+        print(summary_dict)
+        with open(os.path.join(save_dir, "summary.txt"), "w") as f:
+            import json
+            json.dump(summary_dict, f, ensure_ascii=False, indent=2)
+
     if args.infer_count > 0 and len(collected_images) > 0:
         row_image = np.concatenate(collected_images, axis=1)
         output_file_name = 'img_' + str(args.infer_count) + "samples" +'_seed' + str(seed) + ".png"

@@ -312,7 +312,7 @@ class FlexARInferenceSolver:
             device_map=device,
         )
 
-        self.item_processor = FlexARItemProcessor(target_size=target_size, vae_tokenizer_path=vae_tokenizer_path)
+        self.item_processor = FlexARItemProcessor(tokenizer=model_path, target_size=target_size, vae_tokenizer_path=vae_tokenizer_path)
         self.inbatch_cfg = True
         
         
@@ -387,6 +387,11 @@ class FlexARInferenceSolver:
 
         if logits_processor is None:
             logits_processor = self.create_logits_processor()        
+        
+        if "return_anything_dict" in kwargs.keys():
+            return_anything_dict = kwargs["return_anything_dict"]
+        else:
+            return_anything_dict = False
 
         with torch.cuda.amp.autocast(dtype=self.dtype), torch.no_grad():
             token_sequence = self.sampler.sample(
@@ -401,10 +406,17 @@ class FlexARInferenceSolver:
                 block_size=block_size,
                 draft_use_bi_mask=not draft_use_causal_mask, # stupid implementation
                 ar_rows=ar_rows,
+                return_anything_dict=return_anything_dict,
             )
+        
+        if return_anything_dict:
+            token_sequence, anything_dict = token_sequence
         image_tokens = token_sequence[0][prompt_len:-1].tolist()
-    
-        return self.decode_ids(image_tokens)
+
+        if return_anything_dict:
+            return self.decode_ids(image_tokens), anything_dict
+        else:
+            return self.decode_ids(image_tokens)
 
     def decode_ids(self, tokens: List[int]):
         generated_images = []

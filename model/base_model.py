@@ -65,7 +65,7 @@ def load_lumina_with_lora(
                         "down_proj",
                         # "lm_head"
                         ],
-        modules_to_save=["lm_head"],
+        # modules_to_save=["lm_head"],
         lora_dropout=0.05,
         bias="none",
         task_type=TaskType.CAUSAL_LM
@@ -178,7 +178,7 @@ def load_janus_with_lora(
                         "up_proj", 
                         "down_proj",
                         ],
-        modules_to_save=["gen_head"],
+        # modules_to_save=["gen_head"],
         lora_dropout=0.05,
         bias="none",
         task_type=TaskType.CAUSAL_LM
