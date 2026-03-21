@@ -5,6 +5,7 @@ os.environ["NCCL_IB_DISABLE"] = "1"
 
 import argparse
 from transformers import Trainer, TrainingArguments
+
 from typing import Dict, Optional
 
 from data import TokenDataset, ImageRowCollator, JanusImageRowCollator
@@ -21,6 +22,12 @@ class MyTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.custom_losses = {"steps": 0}
+
+    def save_model(self, output_dir=None, _internal_call=False):
+        if output_dir is None:
+            output_dir = self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        self.model.save_pretrained(output_dir)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         outputs = model(**inputs)
