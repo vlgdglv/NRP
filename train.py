@@ -123,7 +123,7 @@ def train(args):
     else:
         raise NotImplementedError
     
-    losses = args.losses
+    losses = args.losses if args.losses is not None else []
     use_ce = True if "ce" in losses else False
     use_kd = True if "kd" in losses else False
     use_tv = True if "tv" in losses else False
@@ -152,6 +152,7 @@ def train(args):
         mse_weight=args.mse_weight,
         image_latent_width=image_width,
         image_latent_height=image_height,
+        use_gumbel=args.use_gumbel,
     )
     
     if model_name == "janus":
@@ -257,6 +258,7 @@ if __name__ == "__main__":
     parser.add_argument("--topk_cover_topk", type=int, default=128)
     parser.add_argument("--mse_weight", type=float, default=1.0)
     parser.add_argument("--use_teacher", action="store_true")
+    parser.add_argument("--use_gumbel", action="store_true")
     parser.add_argument("--use_standard_causal", action="store_true")
     parser.add_argument("--enable_wandb", action="store_true")
     parser.add_argument("--run_name", type=str, default=None)

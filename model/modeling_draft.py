@@ -25,6 +25,9 @@ class RowExpertModel(nn.Module):
         mse_weight: float = 1.0,
         image_latent_width: int = 49,
         image_latent_height: int = 48,
+        use_gumbel: bool = False,
+        gumbel_weight: float = 1.0,
+        gumbel_tau: float = 1.0,
     ):
         super().__init__()
         self.base_model = base_model
@@ -52,6 +55,10 @@ class RowExpertModel(nn.Module):
         self.image_latent_width = image_latent_width
         self.image_latent_height = image_latent_height
         self.offset = image_latent_width - 1
+        
+        self.use_gumbel = use_gumbel
+        self.gumbel_weight = gumbel_weight
+        self.gumbel_tau = gumbel_tau
 
     def save_pretrained(self, output_dir):
         self.base_model.save_pretrained(output_dir)
@@ -89,6 +96,41 @@ class RowExpertModel(nn.Module):
                 ce_loss = loss_fn(shift_logits, shift_labels)
                 loss = loss + self.ce_weight * ce_loss
                 output_dict["ce_loss"] = ce_loss.detach()
+                
+            if self.use_gumbel:
+                draft_one_hot = F.gumbel_softmax(student_logits, tau=self.gumbel_tau, hard=True)
+                
+                # embed_weight = self.base_model.get_input_embeddings().weight
+                # draft_embeds = torch.matmul(draft_one_hot, embed_weight)
+                # print(embed_weight.shape, draft_one_hot.shape)
+                
+                raw_8d_embeds = draft_one_hot @ self.base_model.gen_embed.weight
+                draft_embeds = self.base_model.gen_aligner(raw_8d_embeds)
+                was_training = self.base_model.training
+                self.base_model.eval()
+                
+                with self.base_model.disable_adapter():
+                    refine_outputs = self.base_model(
+                        inputs_embeds=draft_embeds,
+                        use_cache=False,
+                        output_hidden_states=False,
+                    )
+                    l2_logits = refine_outputs.logits
+                
+                if was_training:
+                    self.base_model.train()
+                
+                invalid = -100
+                valid_mask = (labels != invalid)
+                
+                aligned_l2_logits = l2_logits
+
+                l2_logits_v = aligned_l2_logits[valid_mask]
+                labels_v = labels[valid_mask]
+                
+                gumbel_ce_loss = F.cross_entropy(l2_logits_v, labels_v.long())
+                output_dict["gumbel_loss"] = gumbel_ce_loss.detach()
+                loss = loss + self.gumbel_weight * gumbel_ce_loss
             
             needs_teacher_logits = (
                 self.use_kd or 

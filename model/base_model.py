@@ -65,7 +65,7 @@ def load_lumina_with_lora(
                         "down_proj",
                         # "lm_head"
                         ],
-        # modules_to_save=["lm_head"],
+        modules_to_save=["lm_head"],
         lora_dropout=0.05,
         bias="none",
         task_type=TaskType.CAUSAL_LM
