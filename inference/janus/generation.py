@@ -287,6 +287,7 @@ def gererate_row_parallel_with_probe(
     device = next(mmgpt.language_model.parameters()).device
     
     gt_ranks, draft_ranks = [], []
+    tv_distances = []
     for r in range(ar_rows, image_height):
         row_cond = torch.stack(prev_row_embs, dim=0).to(device)          # [W, D]
         step_emb = torch.stack([row_cond, row_cond], dim=0).contiguous() # [2, W, D]
@@ -349,22 +350,29 @@ def gererate_row_parallel_with_probe(
         
         gt_tokens = torch.cat(gt_tokens, dim=-1)
         gt_scores = torch.cat(gt_scores, dim=0)
+        p_draft = q_probs.view(-1, q_probs.shape[-1])
+        p_target = gt_scores.view(-1, gt_scores.shape[-1])
         
         gt_rank = (q_probs.squeeze(0).argsort(dim=-1, descending=True) == gt_tokens.view(-1, 1)).nonzero()[:,1]
         draft_rank = (gt_scores.argsort(dim=-1, descending=True) == proposal.view(-1, 1)).nonzero()[:,1]
         gt_ranks.append(gt_rank)
         draft_ranks.append(draft_rank)
-    
+        
+        tv_dist = 0.5 * torch.abs(p_draft - p_target).sum(dim=-1)
+        tv_distances.append(tv_dist)
 
     gt_ranks = torch.cat(gt_ranks, dim=-1).to(torch.float)
     # print("Mean gt rank: {:.4f}, Std: {:.4f}".format(gt_ranks.mean(), gt_ranks.std()))
     draft_ranks = torch.cat(draft_ranks, dim=-1).to(torch.float)
     # print("Mean draft rank: {:.4f}, Std: {:.4f}".format(draft_ranks.mean(), draft_ranks.std()))
+    tv_distances = torch.cat(tv_distances, dim=-1).to(torch.float)
+    
     anything_dict["gt_ranks.mean"] = gt_ranks.mean()
     anything_dict["gt_ranks.std"] = gt_ranks.std()
     anything_dict["draft_ranks.mean"] = draft_ranks.mean()
     anything_dict["draft_ranks.std"] = draft_ranks.std()
-    
+    anything_dict["tv_distance.mean"] = tv_distances.mean()
+    anything_dict["tv_distance.std"] = tv_distances.std()
         # prev_row_embs = list(mmgpt.prepare_gen_img_embeds(proposal.unsqueeze(0).expand(2, -1))[0].unbind(dim=0))
         # final_row = proposal.clone()
     

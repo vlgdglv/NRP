@@ -5,7 +5,7 @@ ar_rows=$3
 
 # conda activate gsd310
 
-CUDA_VISIBLE_DEVICES=7 python -m inference.infer_janus \
+CUDA_VISIBLE_DEVICES=3 python -m inference.infer_janus \
     --row_parallel \
     --do_decode --ar_rows $ar_rows \
     --save_name $2 \
