@@ -225,7 +225,10 @@ class ImageRowCollator:
         labels = torch.full_like(input_ids, self.invalid_label, dtype=torch.long)
         causal_mask = torch.tril(torch.ones((L, L), dtype=torch.bool, device=device))
         final_mask_bool = causal_mask.unsqueeze(0).expand(B, L, L).clone() # (B, L, L)
-        
+        target_row_ids = torch.full_like(input_ids, -1, dtype=torch.long)
+        target_col_ids = torch.full_like(input_ids, -1, dtype=torch.long)
+        row_valid_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+
         for i in range(B):
             seq = input_ids[i]
             
@@ -259,12 +262,24 @@ class ImageRowCollator:
                     src_idx, tgt_idx = src_idx[:n], tgt_idx[:n]
                     labels[i, src_idx] = input_ids[i, tgt_idx]
 
+                    tgt_rel = tgt_idx - img_tokens_begin
+                    tgt_row = tgt_rel // self.W
+                    tgt_col = tgt_rel % self.W
+
+                    target_row_ids[i, src_idx] = tgt_row
+                    target_col_ids[i, src_idx] = tgt_col
+                    row_valid_mask[i, src_idx] = True
+
                 # deal with eol
                 if r == self.H-1: continue
+                eol_src = row_base + self.W - 1
                 if self.num_blocks == 1:
-                    labels[i, row_base + self.W - 1] = self.eol_token_id
+                    labels[i, eol_src] = self.eol_token_id
                 else:
-                    labels[i, row_base + self.W - 1] = input_ids[i, row_base + self.W]
+                    labels[i, eol_src] = input_ids[i, row_base + self.W]
+                target_row_ids[i, eol_src] = -1
+                target_col_ids[i, eol_src] = -1
+                row_valid_mask[i, eol_src] = False
                 
             labels[i, seq == self.pad_token_id] = self.invalid_label
             labels[i, seq == self.eos_token_id] = self.invalid_label
@@ -312,12 +327,18 @@ class ImageRowCollator:
                 "attention_mask": attention_mask,
                 "teacher_token": teacher_token,
                 "teacher_logits": teacher_logits,
+                "target_row_ids": target_row_ids,
+                "target_col_ids": target_col_ids,
+                "row_valid_mask": row_valid_mask,
             }
         else:
             return {
                 "input_ids": input_ids,
                 "labels": labels,
-                "attention_mask": attention_mask
+                "attention_mask": attention_mask,
+                "target_row_ids": target_row_ids,
+                "target_col_ids": target_col_ids,
+                "row_valid_mask": row_valid_mask,
             }
 
 

@@ -5,7 +5,7 @@ from datetime import datetime
 from transformers import AutoModelForCausalLM
 
 from model.janus_arch.models import MultiModalityCausalLM, VLChatProcessor
-from inference.janus.generation import build_prompt, generate, gererate_row_parallel, decode_image
+from inference.janus.generation import build_prompt, generate, gererate_row_parallel, decode_image, gererate_row_parallel_with_probe
 import numpy as np
 import os, time
 from peft import PeftModel
@@ -74,6 +74,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--do_decode", action="store_true")
     parser.add_argument("--row_parallel", action="store_true")
+    parser.add_argument("--with_probe", action="store_true")
     parser.add_argument("--do_warmup", type=int, default=1)
     parser.add_argument("--ar_rows", type=int, default=1)
     parser.add_argument("--infer_count", type=int, default=-1, help="number of inference")
@@ -116,7 +117,10 @@ if __name__ == "__main__":
         img_size=target_size,
         patch_size=patch_size,
     )
+    summary_dict = {}
+    summary_dict["cnt"] = 0
     
+    anything_dict = None
 
     for idx, desc in enumerate(image_content_prompts):
         prompt = build_prompt(desc, vl_chat_processor)
@@ -124,12 +128,26 @@ if __name__ == "__main__":
 
         t0 = time.perf_counter()
         if args.row_parallel:
-            token_sequence = gererate_row_parallel(
-                vl_gpt, vl_chat_processor, prompt, 
-                cfg_weight=args.cfg_guidance_scale,
-                ar_rows=args.ar_rows,
-                seed=42
-            )
+            
+            if not args.with_probe:
+                token_sequence = gererate_row_parallel(
+                    vl_gpt, vl_chat_processor, prompt, 
+                    cfg_weight=args.cfg_guidance_scale,
+                    ar_rows=args.ar_rows,
+                    seed=42
+                )
+            else:
+                token_sequence, anything_dict = gererate_row_parallel_with_probe(
+                    vl_gpt, vl_chat_processor, prompt, 
+                    cfg_weight=args.cfg_guidance_scale,
+                    ar_rows=args.ar_rows,
+                    seed=42
+                )
+                for k, v in anything_dict.items():
+                    if k not in summary_dict.keys():
+                        summary_dict[k] = 0.0
+                    summary_dict[k] += v
+                summary_dict["cnt"] += 1
         else:
             token_sequence = generate(
                 vl_gpt, vl_chat_processor, prompt, 
@@ -146,4 +164,9 @@ if __name__ == "__main__":
             )
         dt = time.perf_counter() - t0
         logger.info(f"[{idx}] {base}  ->  {dt:.2f}s  | saved: {paths[0]}")
-       
+    
+    if anything_dict is not None:
+        for k, v in summary_dict.items():
+            if k != "cnt":
+                summary_dict[k] = summary_dict[k] / summary_dict["cnt"]
+        print(summary_dict)

@@ -174,6 +174,7 @@ class SamplerEngine:
         if do_sample:
             probs = torch.nn.functional.softmax(scores / temperature, dim=-1)
             probs = probs.view(-1, probs.shape[-1]) if is_multi_token else probs
+            outputs.probs = probs
             next_token = torch.multinomial(
                 probs,
                 num_samples=1,
@@ -697,6 +698,7 @@ class RowParallelSamplerTester(RowParallelSampler):
             one_step_input = one_step_input.repeat(2, 1) if do_cfg else one_step_input
             # print("one_step_input: ", one_step_input)
             gt_tokens, gt_scores = [],[]
+            tv_distances = []
             with self.model.disable_adapter():
                 for iii in range(self.img_w+1):
                     ones = torch.ones(one_step_input.shape[0], 1, one_step_input.shape[1], dtype=torch.long, device=one_step_input.device)
@@ -718,7 +720,7 @@ class RowParallelSamplerTester(RowParallelSampler):
                     )
                     
                     gt_tokens.append(next_token)
-                    gt_scores.append(outputs.scores)
+                    gt_scores.append(outputs.probs)
 
                     past_key_values = outputs.past_key_values
                     one_step_input = next_token.repeat(2, 1) if do_cfg else next_token
@@ -727,10 +729,16 @@ class RowParallelSamplerTester(RowParallelSampler):
                     # real_lens += next_token.shape[-1]
             gt_tokens = torch.cat(gt_tokens, dim=-1)
             gt_scores = torch.cat(gt_scores, dim=0)
+            p_draft = probs.view(-1, probs.shape[-1])
+            p_target = gt_scores.view(-1, gt_scores.shape[-1])
+        
             # print("gt_tokens: ", gt_tokens)
             
             gt_rank = (scores.squeeze(0).argsort(dim=-1, descending=True) == gt_tokens.view(-1, 1)).nonzero()[:,1]
             draft_rank = (gt_scores.argsort(dim=-1, descending=True) == next_blk_token.view(-1, 1)).nonzero()[:,1]
+            tv_dist = 0.5 * torch.abs(p_draft - p_target).sum(dim=-1)
+            
+            tv_distances.append(tv_dist)
             gt_ranks.append(gt_rank)
             draft_ranks.append(draft_rank)
 
@@ -738,11 +746,14 @@ class RowParallelSamplerTester(RowParallelSampler):
         # print("Mean gt rank: {:.4f}, Std: {:.4f}".format(gt_ranks.mean(), gt_ranks.std()))
         draft_ranks = torch.cat(draft_ranks, dim=-1).to(torch.float)
         # print("Mean draft rank: {:.4f}, Std: {:.4f}".format(draft_ranks.mean(), draft_ranks.std()))
-
+        tv_distances = torch.cat(tv_distances, dim=-1).to(torch.float)
+        
         anything_dict["gt_ranks.mean"] = float(gt_ranks.mean())
         anything_dict["gt_ranks.std"] = float(gt_ranks.std())
         anything_dict["draft_ranks.mean"] = float(draft_ranks.mean())
-        anything_dict["draft_ranks.std"] = float(draft_ranks.std())
+        anything_dict["draft_ranks.std"] = float(draft_ranks.std())    
+        anything_dict["tv_distance.mean"] = float(tv_distances.mean())
+        anything_dict["tv_distance.std"] = float(tv_distances.std())
 
         # Ending: ensure sample is finished
         input_ids = token_sequence[:, -1]

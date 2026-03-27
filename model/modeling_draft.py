@@ -28,6 +28,11 @@ class RowExpertModel(nn.Module):
         use_gumbel: bool = False,
         gumbel_weight: float = 1.0,
         gumbel_tau: float = 1.0,
+        use_topk_mass: bool = False,
+        topk_mass_topk: int = 64,
+        topk_mass_weight: float = 1.0,
+        use_row_rel: bool = False,
+        row_rel_weight: float = 1.0,
     ):
         super().__init__()
         self.base_model = base_model
@@ -40,7 +45,10 @@ class RowExpertModel(nn.Module):
         self.use_tv = use_tv
         self.tv_weight = tv_weight
         self.tv_temp = tv_temp
+
         self.use_acc = use_acc
+        self.use_acc_v0 = False
+        
         self.acc_weight = acc_weight
         self.acc_temp = acc_temp
 
@@ -60,6 +68,13 @@ class RowExpertModel(nn.Module):
         self.gumbel_weight = gumbel_weight
         self.gumbel_tau = gumbel_tau
 
+        self.use_topk_mass = use_topk_mass
+        self.topk_mass_topk = topk_mass_topk
+        self.topk_mass_weight = topk_mass_weight 
+
+        self.use_row_rel = use_row_rel
+        self.row_rel_weight = row_rel_weight
+
     def save_pretrained(self, output_dir):
         self.base_model.save_pretrained(output_dir)
 
@@ -71,12 +86,15 @@ class RowExpertModel(nn.Module):
         teacher_token=None, 
         teacher_logits=None,
         teacher_hidden_states=None,
+        target_row_ids=None,
+        target_col_ids=None,
+        row_valid_mask=None,
     ):    
         outputs = self.base_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             use_cache=False,
-            output_hidden_states=self.use_mse ,
+            output_hidden_states=True,
         )
 
         logits = outputs.logits
@@ -92,7 +110,7 @@ class RowExpertModel(nn.Module):
                 shift_logits = logits.view(-1, logits.shape[-1])
                 shift_labels = labels.view(-1).long()
 
-                loss_fn = CrossEntropyLoss()
+                loss_fn = CrossEntropyLoss(ignore_index=-100)
                 ce_loss = loss_fn(shift_logits, shift_labels)
                 loss = loss + self.ce_weight * ce_loss
                 output_dict["ce_loss"] = ce_loss.detach()
@@ -102,7 +120,6 @@ class RowExpertModel(nn.Module):
                 
                 # embed_weight = self.base_model.get_input_embeddings().weight
                 # draft_embeds = torch.matmul(draft_one_hot, embed_weight)
-                # print(embed_weight.shape, draft_one_hot.shape)
                 
                 raw_8d_embeds = draft_one_hot @ self.base_model.gen_embed.weight
                 draft_embeds = self.base_model.gen_aligner(raw_8d_embeds)
@@ -138,7 +155,10 @@ class RowExpertModel(nn.Module):
                 self.use_acc or 
                 self.use_topk_cover
                 ) and teacher_logits is None
-            needs_teacher_hidden = self.use_mse and teacher_hidden_states is None
+            needs_teacher_hidden = (
+                self.use_mse or
+                self.use_row_rel
+                )and teacher_hidden_states is None
             
             if needs_teacher_logits or needs_teacher_hidden:
                 # infer logits online
@@ -214,7 +234,7 @@ class RowExpertModel(nn.Module):
                 loss = loss + self.tv_weight * tv_loss
                 # print("tv_loss: ", tv_loss.item(), "tv_self: ", tv_self.item())
 
-            if self.use_acc:
+            if self.use_acc_v0:
                 invalid = -100
                 valid_mask = (labels != invalid)
                 student_logits = aligned_student_logits[valid_mask]
@@ -222,9 +242,21 @@ class RowExpertModel(nn.Module):
                 
                 T = float(self.acc_temp)
                 p_student = F.softmax(student_logits / T, dim=-1)
-                log_p_teacher = F.log_softmax(teacher_logits / T, dim=-1)
+                # log_p_teacher = F.log_softmax(teacher_logits / T, dim=-1)
 
                 acc_loss = -(p_student * log_p_student).sum(dim=1).mean()
+                output_dict["acc_loss"] = acc_loss.detach()
+                loss = loss + self.acc_weight * acc_loss
+
+            if self.use_acc:
+                invalid = -100
+                valid_mask = (labels != invalid)
+                student_pred = aligned_student_logits.argmax(dim=-1) 
+
+                teacher_logprob = F.log_softmax(aligned_teacher_logits, dim=-1)
+                acc_logp = torch.gather(teacher_logprob, dim=-1, index=student_pred.unsqueeze(-1)).squeeze(-1)
+                acc_loss = -acc_logp[valid_mask].mean()
+
                 output_dict["acc_loss"] = acc_loss.detach()
                 loss = loss + self.acc_weight * acc_loss
 
@@ -242,8 +274,22 @@ class RowExpertModel(nn.Module):
                 topk_cover_loss = -torch.log(p_student_topk.clamp_min(1e-8)).mean()
                 output_dict["tpkc_loss"] = topk_cover_loss.detach()
                 loss = loss + self.topk_cover_weight * topk_cover_loss
+
+            if self.use_topk_mass:
+                k = self.topk_mass_topk
+                teacher_topk_idx = aligned_teacher_logits.topk(k, dim=-1).indices
+
+                student_logprob = F.log_softmax(aligned_student_logits, dim=-1)
+                student_topk_logprob = torch.gather(
+                    student_logprob, dim=-1, index=teacher_topk_idx,
+                ) #[B, T, K]
+                topk_mass_logprob = torch.logsumexp(student_topk_logprob, dim=-1)
+                topk_mass_loss = -topk_mass_logprob[valid_mask].mean()
+
+                output_dict["topk_mass_loss"] = topk_mass_loss.detach()
+                output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_logprob[valid_mask].exp().mean().detach()
+                loss = loss + self.topk_mass_weight * topk_mass_loss
             
-        
             if self.use_mse:
                 invalid = -100
                 valid_mask = (labels != invalid)
@@ -255,6 +301,39 @@ class RowExpertModel(nn.Module):
                 # mse_loss = F.smooth_l1_loss(s_hidden_v, t_hidden_v, beta=1.0)
                 output_dict["mse_loss"] = mse_loss.detach()
                 loss = loss + self.mse_weight * mse_loss
+
+            if self.use_row_rel:
+                assert target_row_ids is not None
+                assert row_valid_mask is not None
+
+                rel_losses = []
+                B = input_ids.shape[0]
+                for b in range(B):
+                    valid_rows = target_row_ids[b][row_valid_mask[b]].unique()
+                    valid_rows = valid_rows[valid_rows>=0]
+
+                    for rid in valid_rows.tolist():
+                        row_mask_b = row_valid_mask[b] & (target_row_ids[b] == rid)
+
+                        if row_mask_b.sum() < 2: continue
+
+                        hs = aligned_student_hidden[b][row_mask_b]
+                        ht = aligned_teacher_hidden[b][row_mask_b]
+
+                        hs = F.normalize(hs, p=2, dim=-1)
+                        ht = F.normalize(ht, p=2, dim=-1)
+
+                        Rs = hs @ hs.T
+                        Rt = ht @ ht.T
+
+                        rel_losses.append(F.mse_loss(Rs, Rt))
+                if len(rel_losses) > 0:
+                    row_rel_loss = torch.stack(rel_losses).mean()
+                else:
+                    row_rel_loss = aligned_student_logits.new_zeros(())
+                
+                output_dict["row_rel_loss"] = row_rel_loss.detach()
+                loss = loss + self.row_rel_weight * row_rel_loss
 
 
         output_dict["loss"] = loss

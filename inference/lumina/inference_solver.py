@@ -328,8 +328,8 @@ class FlexARInferenceSolver:
             print("has peft_config:", hasattr(lora_model, "peft_config"))
             print("peft_config:", getattr(lora_model, "peft_config", None))
 
-            self.sampler = RowParallelSamplerTester(
-            # self.sampler = RowParallelSampler(
+            # self.sampler = RowParallelSamplerTester(
+            self.sampler = RowParallelSampler(
             # self.sampler = RowParallelWithVerifySampler(
                 lora_model,
                 self.item_processor.tokenizer,

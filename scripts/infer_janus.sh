@@ -1,7 +1,7 @@
 test_lora_name=$1
 # save_name=${2:-$1}
 # infer_count=${3:-1}
-# ar_rows=$4
+ar_rows=$3
 
 # conda activate gsd310
 

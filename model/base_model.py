@@ -48,7 +48,7 @@ def load_lumina_with_lora(
         config=config,
         torch_dtype=torch.bfloat16,
         device_map=None,
-        local_files_only=True
+        # local_files_only=True
     )
     
     model.model.vqmodel.to("cpu")

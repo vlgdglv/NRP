@@ -4,6 +4,7 @@ from datetime import datetime
 import torch
 import torch.nn.functional as F
 from inference.sampler import build_row_bidirectional_mask
+from utils import rollback_kv_cache
 
 from model.janus_arch.models import MultiModalityCausalLM, VLChatProcessor
 import numpy as np
@@ -168,9 +169,7 @@ def gererate_row_parallel(
             tok_emb = mmgpt.prepare_gen_img_embeds(torch.tensor([token_id, token_id], device="cuda").view(-1))       # [2, D]
             input_embeddings = tok_emb.unsqueeze(1)                      # [2,1,D]
 
-            
             prev_row_embs.append(tok_emb[0].detach())
-
             pos_cur += 1
 
     prev_row_embs = prev_row_embs[-image_width:]
@@ -195,9 +194,7 @@ def gererate_row_parallel(
             use_cache=True
         )
         log_q = cfg_merge(mmgpt.gen_head(out_prop.last_hidden_state), cfg_weight).squeeze(0)
-
         q_probs  = F.softmax(log_q / (temperature), dim=-1)   
-
         if do_sample:      # [W, V]
             proposal = torch.multinomial(q_probs, 1, generator=generator).squeeze(-1)      # [W]
         else:
@@ -210,3 +207,176 @@ def gererate_row_parallel(
             generated_tokens[r * image_width + c] = int(final_row[c])
 
     return generated_tokens
+
+
+@torch.inference_mode()
+def gererate_row_parallel_with_probe(
+    mmgpt: MultiModalityCausalLM,
+    vl_chat_processor: VLChatProcessor,
+    prompt: str,
+    cfg_weight=5.0, temperature=1.0,
+    do_sample=True,
+    image_width: int = 24,
+    image_height: int = 24,
+    ar_rows: int = 1,
+    seed: int = 42,
+    use_bi_mask: bool = True
+):
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+
+    tokenizer = vl_chat_processor.tokenizer
+    input_ids = torch.LongTensor(tokenizer.encode(prompt)).to("cuda")
+
+    input_ids = torch.stack([input_ids, input_ids]).to("cuda")
+    input_ids[1, 1:-1] = vl_chat_processor.pad_id
+
+    input_embeddings = mmgpt.language_model.get_input_embeddings()(input_ids)  # [2, Lp, D]
+    L_prefill = input_embeddings.shape[1]
+
+    total_tokens = image_height * image_width
+    gt_tokens, gt_logits = [], []
+
+    generated_tokens = torch.zeros((total_tokens), dtype=torch.int32, device="cuda")
+
+    def cfg_merge(logits, cfg_weight):
+        logit_cond = logits[0::2, :]
+        logit_uncond = logits[1::2, :]
+        return logit_uncond + cfg_weight * (logit_cond - logit_uncond)
+
+    attention_mask = torch.full_like(input_ids, 1, dtype=torch.int32).to("cuda")
+
+    past = None
+    pos_cur = L_prefill
+    
+    anything_dict = {}
+
+    prev_row_embs = []
+    with mmgpt.disable_adapter():
+        for c in range(image_width * ar_rows):
+            if c > 0:
+                ones = torch.ones((input_embeddings.shape[0], 1), dtype=torch.int32, device="cuda")
+                attention_mask = torch.cat([attention_mask, ones], dim=1)
+            out = mmgpt.language_model.model(
+                inputs_embeds=input_embeddings,
+                use_cache=True,
+                attention_mask=attention_mask,
+                past_key_values=past,
+            )
+            hidden_states, past = out.last_hidden_state, out.past_key_values
+            logits = mmgpt.gen_head(hidden_states[:, -1, :])
+            logits = cfg_merge(logits, cfg_weight)
+            probs = torch.softmax(logits / temperature, dim=-1)
+            if do_sample:    
+                nxt = torch.multinomial(probs, num_samples=1, generator=generator).squeeze(0)
+            else:
+                nxt = probs.argmax(dim=-1, keepdim=True)
+            
+            token_id = int(nxt)
+            generated_tokens[c] = token_id
+            gt_tokens.append(token_id)
+
+            tok_emb = mmgpt.prepare_gen_img_embeds(torch.tensor([token_id, token_id], device="cuda").view(-1))       # [2, D]
+            input_embeddings = tok_emb.unsqueeze(1)                      # [2,1,D]            
+            prev_row_embs.append(tok_emb[0].detach())
+
+            pos_cur += 1
+
+    prev_row_embs = prev_row_embs[-image_width:]
+    # prev_row_embs.insert(0, prev_row_embs.pop())
+
+    device = next(mmgpt.language_model.parameters()).device
+    
+    gt_ranks, draft_ranks = [], []
+    tv_distances = []
+    for r in range(ar_rows, image_height):
+        row_cond = torch.stack(prev_row_embs, dim=0).to(device)          # [W, D]
+        step_emb = torch.stack([row_cond, row_cond], dim=0).contiguous() # [2, W, D]
+        ones = torch.ones(attention_mask.shape[0], step_emb.shape[1], dtype=torch.long, device=input_ids.device)
+        attention_mask = torch.cat([attention_mask, ones], dim=-1)
+        if use_bi_mask:
+            final_mask = build_row_bidirectional_mask(attention_mask, step_emb.shape[1]).to(step_emb.dtype)
+        else:
+            final_mask = attention_mask
+        out_prop = mmgpt.language_model.model(
+            inputs_embeds=step_emb,
+            past_key_values=past,
+            attention_mask=final_mask,
+            use_cache=True
+        )
+        log_q = cfg_merge(mmgpt.gen_head(out_prop.last_hidden_state), cfg_weight).squeeze(0)
+
+        q_probs  = F.softmax(log_q / (temperature), dim=-1)   
+
+        if do_sample:      # [W, V]
+            proposal = torch.multinomial(q_probs, 1, generator=generator).squeeze(-1)      # [W]
+        else:
+            proposal = q_probs.argmax(dim=-1)
+        
+        prev_row_embs = []
+        rollback_kv_cache(past, step_emb.shape[1])
+        attention_mask = attention_mask[..., :-step_emb.shape[1]]
+        one_step_token = token_id
+        one_step_emb = mmgpt.prepare_gen_img_embeds(torch.tensor([one_step_token, one_step_token], device="cuda").view(-1)).unsqueeze(1)       # [2, 1, D]
+
+        gt_tokens, gt_scores = [],[]
+        with mmgpt.disable_adapter():
+            for iii in range(image_width):
+                ones = torch.ones(attention_mask.shape[0],  one_step_emb.shape[1], dtype=torch.long, device=input_ids.device)
+                attention_mask = torch.cat([attention_mask, ones], dim=-1)
+                out = mmgpt.language_model.model(
+                    inputs_embeds=one_step_emb,
+                    use_cache=True,
+                    attention_mask=attention_mask,
+                    past_key_values=past,
+                )
+                hidden_states, past = out.last_hidden_state, out.past_key_values
+                logits = mmgpt.gen_head(hidden_states[:, -1, :])
+                logits = cfg_merge(logits, cfg_weight)
+                probs = torch.softmax(logits / temperature, dim=-1)
+                if do_sample:    
+                    nxt = torch.multinomial(probs, num_samples=1, generator=generator).squeeze(0)
+                else:
+                    nxt = probs.argmax(dim=-1, keepdim=True)
+            
+                gt_tokens.append(nxt)
+                gt_scores.append(probs)
+
+                token_id = int(nxt)
+                generated_tokens[r * image_width + iii] = token_id
+
+                tok_emb = mmgpt.prepare_gen_img_embeds(torch.tensor([token_id, token_id], device="cuda").view(-1))       # [2, D]
+                one_step_emb = tok_emb.unsqueeze(1)                      # [2,1,D]            
+                prev_row_embs.append(tok_emb[0].detach())
+        
+        gt_tokens = torch.cat(gt_tokens, dim=-1)
+        gt_scores = torch.cat(gt_scores, dim=0)
+        p_draft = q_probs.view(-1, q_probs.shape[-1])
+        p_target = gt_scores.view(-1, gt_scores.shape[-1])
+        
+        gt_rank = (q_probs.squeeze(0).argsort(dim=-1, descending=True) == gt_tokens.view(-1, 1)).nonzero()[:,1]
+        draft_rank = (gt_scores.argsort(dim=-1, descending=True) == proposal.view(-1, 1)).nonzero()[:,1]
+        gt_ranks.append(gt_rank)
+        draft_ranks.append(draft_rank)
+        
+        tv_dist = 0.5 * torch.abs(p_draft - p_target).sum(dim=-1)
+        tv_distances.append(tv_dist)
+
+    gt_ranks = torch.cat(gt_ranks, dim=-1).to(torch.float)
+    # print("Mean gt rank: {:.4f}, Std: {:.4f}".format(gt_ranks.mean(), gt_ranks.std()))
+    draft_ranks = torch.cat(draft_ranks, dim=-1).to(torch.float)
+    # print("Mean draft rank: {:.4f}, Std: {:.4f}".format(draft_ranks.mean(), draft_ranks.std()))
+    tv_distances = torch.cat(tv_distances, dim=-1).to(torch.float)
+    
+    anything_dict["gt_ranks.mean"] = gt_ranks.mean()
+    anything_dict["gt_ranks.std"] = gt_ranks.std()
+    anything_dict["draft_ranks.mean"] = draft_ranks.mean()
+    anything_dict["draft_ranks.std"] = draft_ranks.std()
+    anything_dict["tv_distance.mean"] = tv_distances.mean()
+    anything_dict["tv_distance.std"] = tv_distances.std()
+        # prev_row_embs = list(mmgpt.prepare_gen_img_embeds(proposal.unsqueeze(0).expand(2, -1))[0].unbind(dim=0))
+        # final_row = proposal.clone()
+    
+        # for c in range(image_width):
+        #     generated_tokens[r * image_width + c] = int(final_row[c])
+
+    return generated_tokens, anything_dict

@@ -29,31 +29,31 @@ class MyTrainer(Trainer):
         os.makedirs(output_dir, exist_ok=True)
         self.model.save_pretrained(output_dir)
 
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        outputs = model(**inputs)
-        loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
+    # def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+    #     outputs = model(**inputs)
+    #     loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
 
-        if self.args.process_index == 0 and isinstance(outputs, dict):
-            for key, value in outputs.items():
-                if "loss" in key and key != "loss":
-                    val = value.item() if hasattr(value, "item") else value
-                    self.custom_losses[key] = self.custom_losses.get(key, 0.0) + val
+    #     if self.args.process_index == 0 and isinstance(outputs, dict):
+    #         for key, value in outputs.items():
+    #             if "loss" in key and key != "loss":
+    #                 val = value.item() if hasattr(value, "item") else value
+    #                 self.custom_losses[key] = self.custom_losses.get(key, 0.0) + val
             
-            self.custom_losses["steps"] += 1
+    #         self.custom_losses["steps"] += 1
 
-        return (loss, outputs) if return_outputs else loss
+    #     return (loss, outputs) if return_outputs else loss
 
-    def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
-        if self.args.process_index == 0 and self.custom_losses.get("steps", 0) > 0:
-            steps = self.custom_losses["steps"]
+    # def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
+    #     if self.args.process_index == 0 and self.custom_losses.get("steps", 0) > 0:
+    #         steps = self.custom_losses["steps"]
             
-            for key, total_val in self.custom_losses.items():
-                if key != "steps":
-                    logs[f"train/{key}"] = total_val / steps
+    #         for key, total_val in self.custom_losses.items():
+    #             if key != "steps":
+    #                 logs[f"train/{key}"] = total_val / steps
             
-            self.custom_losses = {"steps": 0}
+    #         self.custom_losses = {"steps": 0}
 
-        super().log(logs, start_time)
+    #     super().log(logs, start_time)
 
 def normalize_dataset_cfg(args):
     dataset_names = args.dataset_name
@@ -130,6 +130,8 @@ def train(args):
     use_acc = True if "acc" in losses else False
     use_topk_cover = True if "topk_cover" in losses else False
     use_mse = True if "mse" in losses else False
+    use_topk_mass = True if "topk_mass" in losses else False
+    use_rel_loss = True if "rel_loss" in losses else False
 
     model = RowExpertModel(
         base_model,
@@ -153,6 +155,11 @@ def train(args):
         image_latent_width=image_width,
         image_latent_height=image_height,
         use_gumbel=args.use_gumbel,
+        use_topk_mass=use_topk_mass,
+        topk_mass_topk=args.topk_mass_topk,
+        topk_mass_weight=args.topk_mass_weight,
+        use_row_rel=use_rel_loss,
+        row_rel_weight=args.row_rel_weight,
     )
     
     if model_name == "janus":
@@ -245,7 +252,7 @@ if __name__ == "__main__":
     parser.add_argument("--image_height", type=int, default=48)
     parser.add_argument("--lora_rank", type=int, default=64)
     parser.add_argument("--lora_alpha", type=int, default=128)
-    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd", "tv", "acc", "topk_cover", "mse"], )
+    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd", "tv", "acc", "topk_cover", "mse", "topk_mass", "rel_loss"], )
     parser.add_argument("--ce_weight", type=float, default=1.0)
     parser.add_argument("--kd_weight", type=float, default=1.0)
     parser.add_argument("--kd_temp", type=float, default=1.0)
@@ -259,6 +266,9 @@ if __name__ == "__main__":
     parser.add_argument("--mse_weight", type=float, default=1.0)
     parser.add_argument("--use_teacher", action="store_true")
     parser.add_argument("--use_gumbel", action="store_true")
+    parser.add_argument("--topk_mass_weight", type=float, default=1.0)
+    parser.add_argument("--topk_mass_topk", type=int, default=64)
+    parser.add_argument("--row_rel_weight", type=float, default=1.0)
     parser.add_argument("--use_standard_causal", action="store_true")
     parser.add_argument("--enable_wandb", action="store_true")
     parser.add_argument("--run_name", type=str, default=None)
