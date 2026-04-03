@@ -63,7 +63,10 @@ class JanusImageRowCollator:
 
         causal_mask = torch.tril(torch.ones((L, L), dtype=torch.bool, device=device))
         final_mask_bool = causal_mask.unsqueeze(0).expand(B, L, L).clone() # (B, L, L)
-        
+        target_row_ids = torch.full_like(input_ids, -1, dtype=torch.long)
+        target_col_ids = torch.full_like(input_ids, -1, dtype=torch.long)
+        row_valid_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+
         for i in range(B):
             seq = input_ids[i]
             
@@ -85,7 +88,14 @@ class JanusImageRowCollator:
                 if r == self.H - 1:
                     continue
                 labels[i, src] = seq[tgt]
-           
+                tgt_rel = tgt - row_start
+                tgt_row = tgt_rel // self.W
+                tgt_col = tgt_rel % self.W
+                
+                target_row_ids[i, src] = tgt_row
+                target_col_ids[i, src] = tgt_col
+                row_valid_mask[i, src] = True
+                
             labels[i, :img_begin] = self.invalid_label
 
             if Li < L:
@@ -132,7 +142,10 @@ class JanusImageRowCollator:
             return {
                 "input_ids": input_ids,
                 "labels": labels,
-                "attention_mask": attention_mask
+                "attention_mask": attention_mask,
+                "target_row_ids": target_row_ids,
+                "target_col_ids": target_col_ids,
+                "row_valid_mask": row_valid_mask,
             }
         
 

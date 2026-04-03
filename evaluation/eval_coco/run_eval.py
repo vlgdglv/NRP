@@ -103,6 +103,23 @@ def calc_generated_clip_score(
     print("mean: {:.4f}, std: {:.4f}".format(mean, std))
 
 
+def prepare_coco2017_val_fid_stats(
+    data_root: str = "/jizhicfs/pkuhetu/bht/data",
+    stats_name: str = "coco2017_val",
+    mode: str = "clean",
+):
+    root = Path(data_root).expanduser()
+    val_dir = root / "val2017"
+
+    if not val_dir.is_dir():
+        raise FileNotFoundError(f"val2017 dir not found: {val_dir}")
+
+    print(f"[FID] Preparing custom stats '{stats_name}' from {val_dir} ...")
+    fid.make_custom_stats(stats_name, str(val_dir), mode=mode)
+    print(f"[FID] Done. You can now use dataset_name='{stats_name}', dataset_split='custom'.")
+
+
+
 if __name__ == "__main__":
     # parser = argparse.ArgumentParser()
     # parser.add_argument("--image_paths", type=str, required=True)
@@ -116,8 +133,9 @@ if __name__ == "__main__":
     # with open(args.image_paths, "r") as f:
     #     image_paths = json.load(f)
 
-    
-    calc_original_clip_score(model_name="local-dir:/home/vlgd/Models/vit_large_patch14_clip_224.openai")
+    # calc_original_clip_score(model_name="local-dir:/home/vlgd/Models/vit_large_patch14_clip_224.openai")
+    # prepare_coco2017_val_fid_stats()
+
     if False:
         score = fid.compute_fid(
             "generated/baseline_coco2017_val",
@@ -138,6 +156,19 @@ if __name__ == "__main__":
         calc_generated_clip_score(
             model_name="local-dir:/home/vlgd/Models/vit_large_patch14_clip_224.openai",
             image_dir="generated/row_parallel_coco2017_val",
+            image_name_fmt="generated_{}.jpg",
+            )
+    if True:
+        score = fid.compute_fid(
+            "/jizhicfs/pkuhetu/bht/NRP/inference_outputs/lumina/rk64_lm_ce_acc_topkm_e5_ar4_cocoval",
+            dataset_name="coco2017_val",
+            dataset_split="custom",
+            mode="clean"
+        )
+        print(score)
+        calc_generated_clip_score(
+            model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
+            image_dir="/jizhicfs/pkuhetu/bht/NRP/inference_outputs/lumina/rk64_lm_ce_acc_topkm_e5_ar4_cocoval",
             image_name_fmt="generated_{}.jpg",
             )
     # inference_outputs/lumina/baseline_coco2017

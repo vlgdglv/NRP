@@ -88,6 +88,7 @@ def generate(
 
         next_token = torch.multinomial(probs, num_samples=1, generator=generator)
         generated_tokens[:, i] = next_token.squeeze(dim=-1)
+        
         next_token = torch.cat([next_token.unsqueeze(dim=1), next_token.unsqueeze(dim=1)], dim=1).view(-1)
         img_embeds = mmgpt.prepare_gen_img_embeds(next_token)
         inputs_embeds = img_embeds.unsqueeze(dim=1)

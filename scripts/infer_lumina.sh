@@ -11,4 +11,4 @@ CUDA_VISIBLE_DEVICES=$GPU python -m inference.infer_lumina \
     --lora_path training_outputs/lumina/$test_lora_name \
     --save_name $save_name \
     --infer_count $infer_count \
-    --ar_rows $ar_rows # --return_anything_dict # --draft_use_causal_mask
+    --ar_rows $ar_rows #--return_anything_dict # --draft_use_causal_mask

@@ -102,7 +102,7 @@ class RowExpertModel(nn.Module):
         output_dict = {}
         output_dict["logits"] = logits
         student_logits = logits
-        student_hidden_states = outputs.hidden_states[-1] if self.use_mse else None
+        student_hidden_states = outputs.hidden_states[-1]
         
         
         if labels is not None:
@@ -116,7 +116,7 @@ class RowExpertModel(nn.Module):
                 output_dict["ce_loss"] = ce_loss.detach()
                 
             if self.use_gumbel:
-                draft_one_hot = F.gumbel_softmax(student_logits, tau=self.gumbel_tau, hard=True)
+                draft_one_hot = F.gumbel_softmax(student_logits, tau=self.gumbel_tau, hard=False)
                 
                 # embed_weight = self.base_model.get_input_embeddings().weight
                 # draft_embeds = torch.matmul(draft_one_hot, embed_weight)
@@ -153,12 +153,14 @@ class RowExpertModel(nn.Module):
                 self.use_kd or 
                 self.use_tv or 
                 self.use_acc or 
-                self.use_topk_cover
+                self.use_topk_cover or
+                self.use_topk_mass or 
+                self.use_row_rel
                 ) and teacher_logits is None
             needs_teacher_hidden = (
                 self.use_mse or
                 self.use_row_rel
-                )and teacher_hidden_states is None
+                ) and teacher_hidden_states is None
             
             if needs_teacher_logits or needs_teacher_hidden:
                 # infer logits online
@@ -170,10 +172,10 @@ class RowExpertModel(nn.Module):
                             input_ids=input_ids,
                             attention_mask=torch.ones_like(input_ids),
                             use_cache=False,
-                            output_hidden_states=self.use_mse,
+                            output_hidden_states=needs_teacher_hidden,
                         )
                         teacher_logits = teacher_outputs.logits
-                        if self.use_mse:
+                        if needs_teacher_hidden:
                             teacher_hidden_states = teacher_outputs.hidden_states[-1]
                 if was_training:
                     self.base_model.train()
@@ -183,11 +185,11 @@ class RowExpertModel(nn.Module):
                     pad_logits = torch.zeros_like(teacher_logits[:, :self.offset, :])
                     aligned_teacher_logits = torch.cat([teacher_logits[:, self.offset:, :], pad_logits], dim=1)
                     
-                    if self.use_mse:
+                    if needs_teacher_hidden:
                         aligned_student_hidden = student_hidden_states
                         pad_hidden = torch.zeros_like(teacher_hidden_states[:, :self.offset, :])
                         aligned_teacher_hidden = torch.cat([teacher_hidden_states[:, self.offset:, :], pad_hidden], dim=1)
-                        
+            
             # not sparse kd anymore
             if self.use_kd:
                 invalid = -100
@@ -276,6 +278,8 @@ class RowExpertModel(nn.Module):
                 loss = loss + self.topk_cover_weight * topk_cover_loss
 
             if self.use_topk_mass:
+                invalid = -100
+                valid_mask = (labels != invalid)
                 k = self.topk_mass_topk
                 teacher_topk_idx = aligned_teacher_logits.topk(k, dim=-1).indices
 

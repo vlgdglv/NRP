@@ -29,31 +29,31 @@ class MyTrainer(Trainer):
         os.makedirs(output_dir, exist_ok=True)
         self.model.save_pretrained(output_dir)
 
-    # def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-    #     outputs = model(**inputs)
-    #     loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        outputs = model(**inputs)
+        loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
 
-    #     if self.args.process_index == 0 and isinstance(outputs, dict):
-    #         for key, value in outputs.items():
-    #             if "loss" in key and key != "loss":
-    #                 val = value.item() if hasattr(value, "item") else value
-    #                 self.custom_losses[key] = self.custom_losses.get(key, 0.0) + val
+        if self.args.process_index == 0 and isinstance(outputs, dict):
+            for key, value in outputs.items():
+                if "loss" in key and key != "loss":
+                    val = value.item() if hasattr(value, "item") else value
+                    self.custom_losses[key] = self.custom_losses.get(key, 0.0) + val
             
-    #         self.custom_losses["steps"] += 1
+            self.custom_losses["steps"] += 1
 
-    #     return (loss, outputs) if return_outputs else loss
+        return (loss, outputs) if return_outputs else loss
 
-    # def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
-    #     if self.args.process_index == 0 and self.custom_losses.get("steps", 0) > 0:
-    #         steps = self.custom_losses["steps"]
+    def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
+        if self.args.process_index == 0 and self.custom_losses.get("steps", 0) > 0:
+            steps = self.custom_losses["steps"]
             
-    #         for key, total_val in self.custom_losses.items():
-    #             if key != "steps":
-    #                 logs[f"train/{key}"] = total_val / steps
+            for key, total_val in self.custom_losses.items():
+                if key != "steps":
+                    logs[f"train/{key}"] = total_val / steps
             
-    #         self.custom_losses = {"steps": 0}
+            self.custom_losses = {"steps": 0}
 
-    #     super().log(logs, start_time)
+        super().log(logs, start_time)
 
 def normalize_dataset_cfg(args):
     dataset_names = args.dataset_name
@@ -90,7 +90,7 @@ def train(args):
     lora_rank = args.lora_rank
     lora_alpha = args.lora_alpha
     use_standard_causal = args.use_standard_causal
-
+    warmup_ratio = args.warmup_ratio
     
     run_name = args.run_name or f"lora_{lora_rank}_{lora_alpha}_{epochs}_{batch_size}_{lerarning_rate}_{'cm' if use_standard_causal else 'bm'}"
     output_dir = os.path.join(args.output_dir, run_name)
@@ -204,7 +204,7 @@ def train(args):
         output_dir=output_dir,
         num_train_epochs=epochs,
         learning_rate=lerarning_rate,
-        warmup_ratio=0.05,
+        warmup_ratio=warmup_ratio,
         lr_scheduler_type="cosine",
         per_device_train_batch_size=batch_size,
         bf16=True,
@@ -246,6 +246,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--warmup_ratio", type=float, default=0.05)
     parser.add_argument("--save_strategy", type=str, default="steps") # "no", "epoch", "steps"
     parser.add_argument("--save_steps", type=int, default=2500)
     parser.add_argument("--image_width", type=int, default=49, help="include end-of-line token") # include end-of-line token

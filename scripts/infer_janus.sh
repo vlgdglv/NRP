@@ -2,10 +2,11 @@ test_lora_name=$1
 # save_name=${2:-$1}
 # infer_count=${3:-1}
 ar_rows=$3
+GPU=$4
 
 # conda activate gsd310
 
-CUDA_VISIBLE_DEVICES=0 python -m inference.infer_janus \
+CUDA_VISIBLE_DEVICES=$GPU python -m inference.infer_janus \
     --row_parallel \
     --do_decode --ar_rows 1 \
     --save_name $2 \

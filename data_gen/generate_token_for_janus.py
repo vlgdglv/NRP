@@ -36,7 +36,7 @@ if __name__ == "__main__":
     dataset_home_dir = "/jizhicfs/pkuhetu/bht/NRP/datasets/image_token_train_Janus"
     if args.dataset_name == "COCO":
         prompt_path = "/jizhicfs/pkuhetu/bht/NRP/datasets/coco2017_train_prompts.json"
-        save_dir = os.path.join(dataset_home_dir, "COCO_Janus_tokens_for_train_raw_prompt")
+        save_dir = os.path.join(dataset_home_dir, "COCO_Janus_tokens_for_train")
     elif args.dataset_name == "laion":
         prompt_path = "/jizhicfs/pkuhetu/bht/NRP/datasets/laion_20k.json"
         save_dir = os.path.join(dataset_home_dir, "laion_Janus_tokens_for_train")
@@ -77,15 +77,15 @@ if __name__ == "__main__":
         idx = offset + args.begin
         prompt = item[args.json_key]
         
-        full_prompt_text = build_prompt(prompt, vl_chat_processor)
+        full_prompt = build_prompt(prompt, vl_chat_processor)
         # full_prompt_text = prompt
-        # print(f"full_prompt_text: {full_prompt_text}")
+
         time_start = time.time()
         torch.cuda.synchronize()
 
         with torch.no_grad():
             returns = generate(
-                vl_gpt, vl_chat_processor, prompt, 
+                vl_gpt, vl_chat_processor, full_prompt, 
                 image_token_num_per_image=image_token_num_per_image,
                 cfg_weight=cfg_guidance_scale,
                 seed=42,
