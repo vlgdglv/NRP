@@ -158,7 +158,7 @@ if __name__ == "__main__":
             image_dir="generated/row_parallel_coco2017_val",
             image_name_fmt="generated_{}.jpg",
             )
-    if True:
+    if False:
         score = fid.compute_fid(
             "/jizhicfs/pkuhetu/bht/NRP/inference_outputs/lumina/rk64_lm_ce_acc_topkm_e5_ar4_cocoval",
             dataset_name="coco2017_val",
@@ -169,6 +169,35 @@ if __name__ == "__main__":
         calc_generated_clip_score(
             model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
             image_dir="/jizhicfs/pkuhetu/bht/NRP/inference_outputs/lumina/rk64_lm_ce_acc_topkm_e5_ar4_cocoval",
+            image_name_fmt="generated_{}.jpg",
+            )
+
+    if False:
+        score = fid.compute_fid(
+            "/jizhicfs/pkuhetu/bht/NRP/inference_outputs/janus/COCO_val2017_baseline",
+            dataset_name="coco2017_val",
+            dataset_split="custom",
+            mode="clean"
+        )
+        print(score)
+        calc_generated_clip_score(
+            model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
+            image_dir="/jizhicfs/pkuhetu/bht/NRP/inference_outputs/janus/COCO_val2017_baseline",
+            image_name_fmt="generated_{}.jpg",
+            )
+    
+    if True:
+        image_dir = "/jizhicfs/pkuhetu/bht/NRP/inference_outputs/janus/rk32_lm_ce_e3_ar4_cocoval"
+        score = fid.compute_fid(
+            image_dir,
+            dataset_name="coco2017_val",
+            dataset_split="custom",
+            mode="clean"
+        )
+        print(score)
+        calc_generated_clip_score(
+            model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
+            image_dir=image_dir,
             image_name_fmt="generated_{}.jpg",
             )
     # inference_outputs/lumina/baseline_coco2017

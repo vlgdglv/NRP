@@ -302,6 +302,7 @@ class FlexARInferenceSolver:
         model_path, vae_tokenizer_path, 
         precision, target_size=512, device="cpu",
         row_parallel=False, lora_path=None, block_size=None, 
+        return_anything_dict=False,
     ):
         self.dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         self.device = device
@@ -328,8 +329,12 @@ class FlexARInferenceSolver:
             print("has peft_config:", hasattr(lora_model, "peft_config"))
             print("peft_config:", getattr(lora_model, "peft_config", None))
 
+            if return_anything_dict:
+                cls_name = RowParallelSamplerTester
+            else:
+                cls_name = RowParallelSampler
             # self.sampler = RowParallelSamplerTester(
-            self.sampler = RowParallelSampler(
+            self.sampler = cls_name(
             # self.sampler = RowParallelWithVerifySampler(
                 lora_model,
                 self.item_processor.tokenizer,
@@ -411,6 +416,7 @@ class FlexARInferenceSolver:
         
         if return_anything_dict:
             token_sequence, anything_dict = token_sequence
+        print(token_sequence.shape)
         image_tokens = token_sequence[0][prompt_len:-1].tolist()
 
         if return_anything_dict:

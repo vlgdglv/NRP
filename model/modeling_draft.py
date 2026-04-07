@@ -33,6 +33,13 @@ class RowExpertModel(nn.Module):
         topk_mass_weight: float = 1.0,
         use_row_rel: bool = False,
         row_rel_weight: float = 1.0,
+
+        use_runtime_vocab_mask: bool = False,
+        runtime_vocab_mask_mode: str | None = None,
+        lumina_image_token_min: int = 4,
+        lumina_image_token_max: int = 8195,
+        lumina_eol_token_id: int = 8803,
+        lumina_eoi_token_id: int = 8196,
     ):
         super().__init__()
         self.base_model = base_model
@@ -75,6 +82,14 @@ class RowExpertModel(nn.Module):
         self.use_row_rel = use_row_rel
         self.row_rel_weight = row_rel_weight
 
+        self.use_runtime_vocab_mask = use_runtime_vocab_mask
+        self.runtime_vocab_mask_mode = runtime_vocab_mask_mode
+
+        self.lumina_image_token_min = lumina_image_token_min
+        self.lumina_image_token_max = lumina_image_token_max
+        self.lumina_eol_token_id = lumina_eol_token_id
+        self.lumina_eoi_token_id = lumina_eoi_token_id
+
     def save_pretrained(self, output_dir):
         self.base_model.save_pretrained(output_dir)
 
@@ -106,6 +121,18 @@ class RowExpertModel(nn.Module):
         
         
         if labels is not None:
+            if False:
+                valid_mask = (labels != -100)
+                logits_v = logits[valid_mask]  # [N, V]
+                prob = F.softmax(logits_v, dim=-1)
+                # lumina visual token range: [4, 8195]
+                visual_prob_mass = prob[:, :8199].sum(dim=-1)  # [N]
+
+                output_dict["teacher_visual_mass_mean"] = visual_prob_mass.mean()
+                output_dict["teacher_visual_mass_min"] = visual_prob_mass.min()
+                output_dict["teacher_visual_mass_p10"] = visual_prob_mass.quantile(0.1)
+                print(output_dict["teacher_visual_mass_mean"], output_dict["teacher_visual_mass_min"], output_dict["teacher_visual_mass_p10"] )
+                
             if self.use_ce:
                 shift_logits = logits.view(-1, logits.shape[-1])
                 shift_labels = labels.view(-1).long()
@@ -253,11 +280,13 @@ class RowExpertModel(nn.Module):
             if self.use_acc:
                 invalid = -100
                 valid_mask = (labels != invalid)
-                student_pred = aligned_student_logits.argmax(dim=-1) 
+                T = float(self.acc_temp)
+                
+                student_prob = F.softmax(aligned_student_logits / T, dim=-1)
+                teacher_logprob = F.log_softmax(aligned_teacher_logits / T, dim=-1)
 
-                teacher_logprob = F.log_softmax(aligned_teacher_logits, dim=-1)
-                acc_logp = torch.gather(teacher_logprob, dim=-1, index=student_pred.unsqueeze(-1)).squeeze(-1)
-                acc_loss = -acc_logp[valid_mask].mean()
+                acc_per_pos = -(student_prob * teacher_logprob).sum(dim=-1)
+                acc_loss = acc_per_pos[valid_mask].mean()
 
                 output_dict["acc_loss"] = acc_loss.detach()
                 loss = loss + self.acc_weight * acc_loss
@@ -281,17 +310,28 @@ class RowExpertModel(nn.Module):
                 invalid = -100
                 valid_mask = (labels != invalid)
                 k = self.topk_mass_topk
-                teacher_topk_idx = aligned_teacher_logits.topk(k, dim=-1).indices
+                T = float(getattr(self, "topk_mass_temp", 1.0))
 
-                student_logprob = F.log_softmax(aligned_student_logits, dim=-1)
+                # teacher_topk_idx = aligned_teacher_logits.topk(k, dim=-1).indices
+                teacher_topk_logits, teacher_topk_idx = torch.topk(aligned_teacher_logits / T, k=k, dim=-1)
+
+                teacher_topk_prob = F.softmax(teacher_topk_logits / T, dim=-1)
+
+                student_logprob = F.log_softmax(aligned_student_logits / T, dim=-1)
                 student_topk_logprob = torch.gather(
                     student_logprob, dim=-1, index=teacher_topk_idx,
                 ) #[B, T, K]
-                topk_mass_logprob = torch.logsumexp(student_topk_logprob, dim=-1)
-                topk_mass_loss = -topk_mass_logprob[valid_mask].mean()
+                
+                topk_mass_per_pos = -(teacher_topk_prob * student_topk_logprob).sum(dim=-1)
+                topk_mass_loss = topk_mass_per_pos[valid_mask].mean()
+
+                # No weighted:
+                # with torch.no_grad():
+                #     topk_mass_logprob = torch.logsumexp(student_topk_logprob, dim=-1)
+                #     output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_logprob[valid_mask].exp().mean().detach()
 
                 output_dict["topk_mass_loss"] = topk_mass_loss.detach()
-                output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_logprob[valid_mask].exp().mean().detach()
+                output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_per_pos[valid_mask].exp().mean().detach()
                 loss = loss + self.topk_mass_weight * topk_mass_loss
             
             if self.use_mse:
@@ -342,3 +382,68 @@ class RowExpertModel(nn.Module):
 
         output_dict["loss"] = loss
         return output_dict
+
+    def _maybe_apply_runtime_vocab_mask(self, logits, target_ids):
+        if (not self.use_runtime_vocab_mask) or (self.runtime_vocab_mask_mode is None):
+            return logits
+        if target_ids is None:
+            return logits
+
+        if self.runtime_vocab_mask_mode == "lumina":
+            return self._apply_lumina_runtime_vocab_mask(logits, target_ids)
+
+        raise ValueError(f"Unknown runtime_vocab_mask_mode: {self.runtime_vocab_mask_mode}")
+
+
+    def _apply_lumina_runtime_vocab_mask(self, logits, target_ids):
+        """
+        Mimic Lumina runtime logits processor at training time.
+
+        Rules:
+        1) normal image positions: only allow visual codebook ids [4, 8195]
+        2) EOL positions: force eol token
+        3) EOI positions: force eoi token
+
+        logits: [N, V] or [B, T, V]
+        target_ids: [N] or [B, T]
+        """
+        if logits.dim() not in (2, 3):
+            raise ValueError(f"logits must be 2D or 3D, got shape={logits.shape}")
+
+        orig_shape = logits.shape
+        vocab_size = orig_shape[-1]
+
+        flat_logits = logits.reshape(-1, vocab_size)
+        flat_targets = target_ids.reshape(-1)
+
+        masked = flat_logits.clone()
+        neg_large = torch.finfo(masked.dtype).min
+
+        # ignore_index positions: leave unchanged
+        ignore_mask = flat_targets == -100
+
+        # 1) normal visual token positions
+        visual_pos_mask = (
+            (flat_targets >= self.lumina_image_token_min) &
+            (flat_targets <= self.lumina_image_token_max)
+        ) & (~ignore_mask)
+
+        if visual_pos_mask.any():
+            if self.lumina_image_token_min > 0:
+                masked[visual_pos_mask, :self.lumina_image_token_min] = neg_large
+            if self.lumina_image_token_max + 1 < vocab_size:
+                masked[visual_pos_mask, self.lumina_image_token_max + 1:] = neg_large
+
+        # # 2) force EOL
+        # eol_pos_mask = (flat_targets == self.lumina_eol_token_id)
+        # if eol_pos_mask.any():
+        #     masked[eol_pos_mask, :] = neg_large
+        #     masked[eol_pos_mask, self.lumina_eol_token_id] = 0.0
+
+        # # 3) force EOI
+        # eoi_pos_mask = (flat_targets == self.lumina_eoi_token_id)
+        # if eoi_pos_mask.any():
+        #     masked[eoi_pos_mask, :] = neg_large
+        #     masked[eoi_pos_mask, self.lumina_eoi_token_id] = 0.0
+
+        return masked.view(orig_shape)

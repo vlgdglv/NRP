@@ -102,28 +102,31 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
 
         with torch.no_grad():
-            returns = inference_solver.collect_tokens(
-                images=[],
-                qas=[[full_prompt_text, None]],
-                max_gen_len=8192,
-                temperature=1.0,
-                cfg_guidance_scale=cfg_guidance_scale,
-                logits_processor=inference_solver.create_logits_processor(cfg=cfg_guidance_scale, image_top_k=image_top_k),
-                seed=seed,
-                do_decode_image=do_decode_image
-            )
-            # returns = inference_solver.generate(
-            #     images=[],
-            #     qas=[[full_prompt_text, None]],
-            #     max_gen_len=8192,
-            #     temperature=1.0,
-            #     cfg_guidance_scale=cfg_guidance_scale,
-            #     logits_processor=inference_solver.create_logits_processor(cfg=cfg_guidance_scale, image_top_k=image_top_k),
-            #     seed=seed,
-            #     block_size=block_size,
-            #     draft_use_causal_mask=False,
-            #     ar_rows=args.ar_rows,
-            # )
+            if args.row_parallel:
+                returns = inference_solver.generate(
+                    images=[],
+                    qas=[[full_prompt_text, None]],
+                    max_gen_len=8192,
+                    temperature=1.0,
+                    cfg_guidance_scale=cfg_guidance_scale,
+                    logits_processor=inference_solver.create_logits_processor(cfg=cfg_guidance_scale, image_top_k=image_top_k),
+                    seed=seed,
+                    block_size=block_size,
+                    draft_use_causal_mask=False,
+                    ar_rows=args.ar_rows,
+                )
+            else:
+                returns = inference_solver.collect_tokens(
+                    images=[],
+                    qas=[[full_prompt_text, None]],
+                    max_gen_len=8192,
+                    temperature=1.0,
+                    cfg_guidance_scale=cfg_guidance_scale,
+                    logits_processor=inference_solver.create_logits_processor(cfg=cfg_guidance_scale, image_top_k=image_top_k),
+                    seed=seed,
+                    do_decode_image=do_decode_image
+                )
+                
         torch.cuda.synchronize()
 
         time_end = time.time()

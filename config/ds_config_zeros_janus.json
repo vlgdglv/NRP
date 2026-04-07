@@ -6,8 +6,7 @@
         "enabled": true
     },
     "zero_optimization": {
-        "stage": 0,
-        "overlap_comm": true,
+        "stage": 1,
         "contiguous_gradients": true,
         "sub_group_size": 1e9,
         "reduce_bucket_size": 50000000,

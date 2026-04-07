@@ -101,7 +101,7 @@ if __name__ == "__main__":
     cfg_guidance_scale = args.cfg_guidance_scale
     ar_rows = args.ar_rows
     return_anything_dict = args.return_anything_dict
-    print("In main: ", return_anything_dict)
+
     row_parallel = args.row_parallel
     lora_path = None
     if row_parallel and args.lora_path is not None:
@@ -116,7 +116,8 @@ if __name__ == "__main__":
         target_size=target_size,
         device = device,
         row_parallel=row_parallel,
-        lora_path=lora_path
+        lora_path=lora_path,
+        return_anything_dict=return_anything_dict,
     )
 
     collected_images = []
