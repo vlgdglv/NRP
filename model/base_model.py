@@ -1,7 +1,7 @@
 import os
 import torch
 from transformers import AutoModelForCausalLM, AutoConfig
-from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training
+from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training, PeftModel
 from utils.logger import get_logger
 from utils import is_rank0
 
@@ -28,9 +28,11 @@ logger = get_logger(__name__)
 
 def load_lumina_with_lora(
     model_path,
-    device, 
-    lora_rank=64, 
-    lora_alpha=128
+    device,
+    lora_rank=64,
+    lora_alpha=128,
+    lora_checkpoint_path=None,
+    strict_loading=False
 ):
     try:
         ChameleonForConditionalGeneration = import_lumina()
@@ -53,25 +55,53 @@ def load_lumina_with_lora(
     
     model.model.vqmodel.to("cpu")
     
-    peft_config = LoraConfig(
-        r=lora_rank,
-        lora_alpha=lora_alpha,
-        target_modules=["q_proj", 
-                        "k_proj", 
-                        "v_proj", 
-                        "o_proj",
-                        "gate_proj", 
-                        "up_proj", 
-                        "down_proj",
-                        # "lm_head"
-                        ],
-        modules_to_save=["lm_head"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM
-    )
+    if lora_checkpoint_path is not None:
+        # Load from existing LoRA checkpoint
+        try:
+            if is_rank0():
+                logger.info(f"Loading LoRA checkpoint from: {lora_checkpoint_path}")
+            model = PeftModel.from_pretrained(model, lora_checkpoint_path, is_trainable=True)
 
-    model = get_peft_model(model, peft_config)
+            # Verify checkpoint compatibility
+            loaded_config = model.peft_config[model.active_adapter]
+            if loaded_config.r != lora_rank or loaded_config.lora_alpha != lora_alpha:
+                warning_msg = (f"Checkpoint LoRA config mismatch: "
+                             f"checkpoint has r={loaded_config.r}, alpha={loaded_config.lora_alpha}, "
+                             f"but requested r={lora_rank}, alpha={lora_alpha}")
+                if strict_loading:
+                    raise ValueError(warning_msg)
+                elif is_rank0():
+                    logger.warning(warning_msg + " - Continuing with checkpoint config")
+
+        except Exception as e:
+            error_msg = f"Failed to load LoRA checkpoint from {lora_checkpoint_path}: {e}"
+            if strict_loading:
+                raise RuntimeError(error_msg)
+            else:
+                if is_rank0():
+                    logger.warning(error_msg + " - Falling back to fresh LoRA initialization")
+                lora_checkpoint_path = None
+
+    if lora_checkpoint_path is None:
+        # Create fresh LoRA configuration
+        peft_config = LoraConfig(
+            r=lora_rank,
+            lora_alpha=lora_alpha,
+            target_modules=["q_proj",
+                            "k_proj",
+                            "v_proj",
+                            "o_proj",
+                            "gate_proj",
+                            "up_proj",
+                            "down_proj",
+                            # "lm_head"
+                            ],
+            modules_to_save=["lm_head"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM
+        )
+        model = get_peft_model(model, peft_config)
     
     if is_rank0():
         print("model type:", type(model))
@@ -84,10 +114,12 @@ def load_lumina_with_lora(
 
 def load_emu3_with_lora(
     model_path,
-    vq_model_path=None, 
-    device=None, 
-    lora_rank=64, 
-    lora_alpha=128
+    vq_model_path=None,
+    device=None,
+    lora_rank=64,
+    lora_alpha=128,
+    lora_checkpoint_path=None,
+    strict_loading=False
 ):
     try:
         Emu3Processor, Emu3ForCausalLM, Emu3VisionVQModel = import_emu3()
@@ -115,24 +147,53 @@ def load_emu3_with_lora(
 
     model = prepare_model_for_kbit_training(model)
  
-    peft_config = LoraConfig(
-        r=lora_rank,
-        lora_alpha=lora_alpha,
-        target_modules=["q_proj", 
-                        "k_proj", 
-                        "v_proj", 
-                        "o_proj",
-                        # "gate_proj", 
-                        # "up_proj", 
-                        # "down_proj",
-                        # "lm_head"
-                        ],
-        # modules_to_save=["lm_head"],
-        # lora_dropout=0.05,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM
-    )
-    model = get_peft_model(model, peft_config)
+    if lora_checkpoint_path is not None:
+        # Load from existing LoRA checkpoint
+        try:
+            if is_rank0():
+                logger.info(f"Loading LoRA checkpoint from: {lora_checkpoint_path}")
+            model = PeftModel.from_pretrained(model, lora_checkpoint_path, is_trainable=True)
+
+            # Verify checkpoint compatibility
+            loaded_config = model.peft_config[model.active_adapter]
+            if loaded_config.r != lora_rank or loaded_config.lora_alpha != lora_alpha:
+                warning_msg = (f"Checkpoint LoRA config mismatch: "
+                             f"checkpoint has r={loaded_config.r}, alpha={loaded_config.lora_alpha}, "
+                             f"but requested r={lora_rank}, alpha={lora_alpha}")
+                if strict_loading:
+                    raise ValueError(warning_msg)
+                elif is_rank0():
+                    logger.warning(warning_msg + " - Continuing with checkpoint config")
+
+        except Exception as e:
+            error_msg = f"Failed to load LoRA checkpoint from {lora_checkpoint_path}: {e}"
+            if strict_loading:
+                raise RuntimeError(error_msg)
+            else:
+                if is_rank0():
+                    logger.warning(error_msg + " - Falling back to fresh LoRA initialization")
+                lora_checkpoint_path = None
+
+    if lora_checkpoint_path is None:
+        # Create fresh LoRA configuration
+        peft_config = LoraConfig(
+            r=lora_rank,
+            lora_alpha=lora_alpha,
+            target_modules=["q_proj",
+                            "k_proj",
+                            "v_proj",
+                            "o_proj",
+                            # "gate_proj",
+                            # "up_proj",
+                            # "down_proj",
+                            # "lm_head"
+                            ],
+            # modules_to_save=["lm_head"],
+            # lora_dropout=0.05,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM
+        )
+        model = get_peft_model(model, peft_config)
     
     if is_rank0():
         print("model type:", type(model))
@@ -145,8 +206,10 @@ def load_emu3_with_lora(
 
 def load_janus_with_lora(
     model_path,
-    lora_rank=64, 
-    lora_alpha=128
+    lora_rank=64,
+    lora_alpha=128,
+    lora_checkpoint_path=None,
+    strict_loading=False
 ):
     try:
         MultiModalityCausalLM, VLChatProcessor = import_janus()
@@ -167,24 +230,52 @@ def load_janus_with_lora(
         trust_remote_code=True
     )
     
-    peft_config = LoraConfig(
-        r=lora_rank,
-        lora_alpha=lora_alpha,
-        target_modules=["q_proj", 
-                        "k_proj", 
-                        "v_proj", 
-                        "o_proj",
-                        "gate_proj", 
-                        "up_proj", 
-                        "down_proj",
-                        ],
-        modules_to_save=["gen_head"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM
-    )
+    if lora_checkpoint_path is not None:
+        # Load from existing LoRA checkpoint
+        try:
+            if is_rank0():
+                logger.info(f"Loading LoRA checkpoint from: {lora_checkpoint_path}")
+            model = PeftModel.from_pretrained(model, lora_checkpoint_path, is_trainable=True)
 
-    model = get_peft_model(model, peft_config)
+            # Verify checkpoint compatibility
+            loaded_config = model.peft_config[model.active_adapter]
+            if loaded_config.r != lora_rank or loaded_config.lora_alpha != lora_alpha:
+                warning_msg = (f"Checkpoint LoRA config mismatch: "
+                             f"checkpoint has r={loaded_config.r}, alpha={loaded_config.lora_alpha}, "
+                             f"but requested r={lora_rank}, alpha={lora_alpha}")
+                if strict_loading:
+                    raise ValueError(warning_msg)
+                elif is_rank0():
+                    logger.warning(warning_msg + " - Continuing with checkpoint config")
+
+        except Exception as e:
+            error_msg = f"Failed to load LoRA checkpoint from {lora_checkpoint_path}: {e}"
+            if strict_loading:
+                raise RuntimeError(error_msg)
+            else:
+                if is_rank0():
+                    logger.warning(error_msg + " - Falling back to fresh LoRA initialization")
+                lora_checkpoint_path = None
+
+    if lora_checkpoint_path is None:
+        # Create fresh LoRA configuration
+        peft_config = LoraConfig(
+            r=lora_rank,
+            lora_alpha=lora_alpha,
+            target_modules=["q_proj",
+                            "k_proj",
+                            "v_proj",
+                            "o_proj",
+                            "gate_proj",
+                            "up_proj",
+                            "down_proj",
+                            ],
+            modules_to_save=["gen_head"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM
+        )
+        model = get_peft_model(model, peft_config)
 
     if is_rank0():
         print("model type:", type(model))

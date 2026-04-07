@@ -78,6 +78,45 @@ class RowExpertModel(nn.Module):
     def save_pretrained(self, output_dir):
         self.base_model.save_pretrained(output_dir)
 
+    @classmethod
+    def from_pretrained(cls,
+                       checkpoint_path,
+                       base_model,
+                       **kwargs):
+        """
+        Create RowExpertModel from a previously saved checkpoint.
+
+        Args:
+            checkpoint_path: Path to the saved RowExpertModel checkpoint
+            base_model: Base model with LoRA already loaded
+            **kwargs: Additional arguments for RowExpertModel initialization
+        """
+        # For now, just create a new instance with the provided base_model
+        # Future enhancement: could save/load loss function configurations
+        return cls(base_model=base_model, **kwargs)
+
+    def load_lora_checkpoint(self, checkpoint_path, strict=True):
+        """
+        Load LoRA weights from checkpoint into existing model.
+
+        Args:
+            checkpoint_path: Path to LoRA checkpoint
+            strict: Whether to enforce strict loading
+        """
+        try:
+            from peft import PeftModel
+            # This would replace the current LoRA weights
+            # Note: This method assumes base_model is already a PeftModel
+            if hasattr(self.base_model, 'load_adapter'):
+                self.base_model.load_adapter(checkpoint_path, "default", is_trainable=True)
+            else:
+                raise ValueError("Base model is not a PEFT model - cannot load LoRA checkpoint")
+        except Exception as e:
+            if strict:
+                raise e
+            else:
+                print(f"Warning: Failed to load LoRA checkpoint: {e}")
+
     def forward(
         self, 
         input_ids, 

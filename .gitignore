@@ -78,3 +78,8 @@ Thumbs.db
 testing_fields
 temp_scripts/
 data_gen/scripts/
+
+############################
+# Claude workspace
+############################
+.project_cc/
