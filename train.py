@@ -101,23 +101,29 @@ def train(args):
         base_model = load_lumina_with_lora(
             model_path=model_path,
             device=device,
-            lora_rank=lora_rank, 
+            lora_rank=lora_rank,
             lora_alpha=lora_alpha,
+            lora_checkpoint_path=args.lora_checkpoint_path,
+            strict_loading=args.strict_checkpoint_loading,
         )
         img_token_config = lumina_img_token_config
     elif model_name == "emu3":
         base_model = load_emu3_with_lora(
             model_path=model_path,
             # device=device,
-            lora_rank=lora_rank, 
-            lora_alpha=lora_alpha
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+            lora_checkpoint_path=args.lora_checkpoint_path,
+            strict_loading=args.strict_checkpoint_loading,
         )
         img_token_config = emu3_img_token_config
     elif model_name == "janus":
         base_model = load_janus_with_lora(
             model_path=model_path,
-            lora_rank=lora_rank, 
-            lora_alpha=lora_alpha
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+            lora_checkpoint_path=args.lora_checkpoint_path,
+            strict_loading=args.strict_checkpoint_loading,
         )
         # img_token_config = janus_img_token_config
     else:
@@ -276,6 +282,10 @@ if __name__ == "__main__":
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--deepspeed", type=str, default=None)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None)
+    parser.add_argument("--lora_checkpoint_path", type=str, default=None,
+                       help="Path to previously saved LoRA checkpoint to continue training from")
+    parser.add_argument("--strict_checkpoint_loading", action="store_true", default=False,
+                       help="Fail if checkpoint loading encounters any errors")
     args = parser.parse_args()
 
     train(args)

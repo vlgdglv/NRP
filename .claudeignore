@@ -1,0 +1,44 @@
+# Data files and model weights
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pkl
+*.joblib
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.csv
+datasets/
+training_outputs/
+inference_outputs/
+outputs/
+results/
+data_gen/
+
+# Bash scripts and configs (unless specifically requested)
+*.sh
+*.bash
+*.config
+*.cfg
+*.conf
+*.yaml
+*.yml
+*.json
+config/
+configs/
+scripts/
+
+# Binary files
+*.bin
+*.so
+*.dll
+*.exe
+
+# Large files
+wandb/
+lightning_logs/
+logs/
+log/
+runs/
