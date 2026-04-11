@@ -25,7 +25,14 @@ class JanusImageRowCollator:
         pad_token_id: int = 100015,
         use_standard_causal: bool = False,
         use_teacher: bool = False,
-        token_check_func: Callable = None
+        token_check_func: Callable = None,
+        # === NEW: Row attention mode config ===
+        # "full": original behavior (full bidirectional within row)
+        # "bidirectional_window": attend to [col-w, col+w] within same row
+        # "causal_window": attend to [col-w, col] within same row
+        # "no_intrarow": no same-row attention except self
+        row_attention_mode: str = "full",
+        row_attention_window: int = 4,
     ):
         
         self.W = image_width
@@ -39,8 +46,14 @@ class JanusImageRowCollator:
         
         self.invalid_label = -100
         self.use_standard_causal = use_standard_causal
-        
+
         self.token_check_func = token_check_func
+
+        # Row attention mode config
+        self.row_attention_mode = row_attention_mode
+        self.row_attention_window = row_attention_window
+        assert row_attention_mode in ("full", "bidirectional_window", "causal_window", "no_intrarow"), \
+            f"Unknown row_attention_mode: {row_attention_mode}"
         
     def __call__(self, batch):
         # batch: List[Dict[str, torch.Tensor]]
@@ -106,17 +119,38 @@ class JanusImageRowCollator:
             else:
                 seg_len = self.image_len
                 seg_pos = torch.arange(seg_len, device=device)
-                
-                row_id = seg_pos // self.W
-                
-                r_i = row_id.unsqueeze(1)
-                r_j = row_id.unsqueeze(0)
-                # b_i = col_id.unsqueeze(1)
-                # b_j = col_id.unsqueeze(0)
 
-                row_visible = (r_i == r_j)
+                row_id = seg_pos // self.W
+                col_id = seg_pos % self.W
+
+                # Compute intra-row visibility based on mode
+                r_i = row_id.unsqueeze(1)  # (seg_len, 1)
+                r_j = row_id.unsqueeze(0)  # (1, seg_len)
+                c_i = col_id.unsqueeze(1)  # (seg_len, 1)
+                c_j = col_id.unsqueeze(0)  # (1, seg_len)
+                same_row = (r_i == r_j)
+
+                if self.row_attention_mode == "full":
+                    # Original behavior: full bidirectional within row
+                    intra_row_visible = same_row
+
+                elif self.row_attention_mode == "bidirectional_window":
+                    # Attend to [col-w, col+w] within same row
+                    w = self.row_attention_window
+                    col_dist = torch.abs(c_i - c_j)
+                    intra_row_visible = same_row & (col_dist <= w)
+
+                elif self.row_attention_mode == "causal_window":
+                    # Attend to [col-w, col] within same row (left-to-right causal)
+                    w = self.row_attention_window
+                    intra_row_visible = same_row & (c_j <= c_i) & (c_j >= c_i - w)
+
+                elif self.row_attention_mode == "no_intrarow":
+                    # Only self-attention within same row (no horizontal help)
+                    intra_row_visible = same_row & (c_i == c_j)
+
                 abs_idx = torch.arange(img_begin, img_end, device=device)
-                final_mask_bool[i, abs_idx.unsqueeze(1), abs_idx.unsqueeze(0)] |= row_visible
+                final_mask_bool[i, abs_idx.unsqueeze(1), abs_idx.unsqueeze(0)] |= intra_row_visible
             pad_pos = (seq == self.pad_token_id).nonzero(as_tuple=False)
             if pad_pos.numel() > 0:
                 pad_pos = pad_pos.squeeze(-1)

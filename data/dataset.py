@@ -165,7 +165,14 @@ class ImageRowCollator:
         eol_token_id: int = 8803,
         eos_token_id: int = 8710,
         img_token_id: int = -1,
-        token_check_func: Callable = None
+        token_check_func: Callable = None,
+        # === NEW: Row attention mode config ===
+        # "full": original behavior (block-based bidirectional)
+        # "bidirectional_window": attend to [col-w, col+w] within same row
+        # "causal_window": attend to [col-w, col] within same row
+        # "no_intrarow": no same-row attention except self
+        row_attention_mode: str = "full",
+        row_attention_window: int = 4,
     ):
         self.W = image_width
         self.H = image_height
@@ -192,6 +199,12 @@ class ImageRowCollator:
         self.img_token_id = img_token_id
 
         self.token_check_func = token_check_func
+
+        # Row attention mode config
+        self.row_attention_mode = row_attention_mode
+        self.row_attention_window = row_attention_window
+        assert row_attention_mode in ("full", "bidirectional_window", "causal_window", "no_intrarow"), \
+            f"Unknown row_attention_mode: {row_attention_mode}"
         
     def __call__(self, batch):
         # batch: List[Dict[str, torch.Tensor]]
@@ -290,24 +303,45 @@ class ImageRowCollator:
             else:
                 seg_len = self.image_len
                 seg_pos = torch.arange(seg_len, device=device)
-                
+
                 row_id = seg_pos // self.W
                 col_id = seg_pos % self.W
                 is_eol = (col_id == self.W - 1)
-            
-                block_id = torch.empty_like(col_id)
-                block_id[~is_eol] = (col_id[~is_eol] // self.block_size)
-                block_id[is_eol] = self.last_block_id
-                
-                r_i = row_id.unsqueeze(1)
-                r_j = row_id.unsqueeze(0)
-                b_i = block_id.unsqueeze(1)
-                b_j = block_id.unsqueeze(0)
-                
-                block_visible = (r_i == r_j) & (b_j <= b_i)
-                
+
+                # Compute intra-row visibility based on mode
+                r_i = row_id.unsqueeze(1)  # (seg_len, 1)
+                r_j = row_id.unsqueeze(0)  # (1, seg_len)
+                c_i = col_id.unsqueeze(1)  # (seg_len, 1)
+                c_j = col_id.unsqueeze(0)  # (1, seg_len)
+                same_row = (r_i == r_j)
+
+                if self.row_attention_mode == "full":
+                    # Original block-based behavior
+                    block_id = torch.empty_like(col_id)
+                    block_id[~is_eol] = (col_id[~is_eol] // self.block_size)
+                    block_id[is_eol] = self.last_block_id
+                    b_i = block_id.unsqueeze(1)
+                    b_j = block_id.unsqueeze(0)
+                    intra_row_visible = same_row & (b_j <= b_i)
+
+                elif self.row_attention_mode == "bidirectional_window":
+                    # Attend to [col-w, col+w] within same row
+                    w = self.row_attention_window
+                    col_dist = torch.abs(c_i - c_j)
+                    intra_row_visible = same_row & (col_dist <= w)
+
+                elif self.row_attention_mode == "causal_window":
+                    # Attend to [col-w, col] within same row (left-to-right causal)
+                    w = self.row_attention_window
+                    # c_j must be in [c_i - w, c_i], i.e., c_i - w <= c_j <= c_i
+                    intra_row_visible = same_row & (c_j <= c_i) & (c_j >= c_i - w)
+
+                elif self.row_attention_mode == "no_intrarow":
+                    # Only self-attention within same row (no horizontal help)
+                    intra_row_visible = same_row & (c_i == c_j)
+
                 abs_idx = torch.arange(img_tokens_begin, img_tokens_end, device=device)
-                final_mask_bool[i, abs_idx.unsqueeze(1), abs_idx.unsqueeze(0)] |= block_visible
+                final_mask_bool[i, abs_idx.unsqueeze(1), abs_idx.unsqueeze(0)] |= intra_row_visible
             pad_pos = (seq == self.pad_token_id).nonzero(as_tuple=False)
             if pad_pos.numel() > 0:
                 pad_pos = pad_pos.squeeze(-1)

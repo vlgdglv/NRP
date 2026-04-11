@@ -190,19 +190,23 @@ def train(args):
 
     if model_name == "janus":
         collator = JanusImageRowCollator(
-            image_width=image_width, 
-            image_height=image_height, 
+            image_width=image_width,
+            image_height=image_height,
             use_standard_causal=use_standard_causal,
             use_teacher=args.use_teacher,
+            row_attention_mode=args.row_attention_mode,
+            row_attention_window=args.row_attention_window,
         )
     else:
-        # assert args.block_size+1 == image_width, "Do not support block-wise prediction in single row." 
+        # assert args.block_size+1 == image_width, "Do not support block-wise prediction in single row."
         collator = ImageRowCollator(
-            image_width=image_width, 
-            image_height=image_height, 
-            use_standard_causal=use_standard_causal, 
+            image_width=image_width,
+            image_height=image_height,
+            use_standard_causal=use_standard_causal,
             block_size=args.block_size,
             use_teacher=args.use_teacher,
+            row_attention_mode=args.row_attention_mode,
+            row_attention_window=args.row_attention_window,
             **img_token_config,
         )
     
@@ -277,6 +281,12 @@ if __name__ == "__main__":
     parser.add_argument("--topk_mass_topk", type=int, default=64)
     parser.add_argument("--row_rel_weight", type=float, default=1.0)
     parser.add_argument("--use_standard_causal", action="store_true")
+    # Row attention mode for research experiments
+    parser.add_argument("--row_attention_mode", type=str, default="full",
+                        choices=["full", "bidirectional_window", "causal_window", "no_intrarow"],
+                        help="Row attention pattern: full (default), bidirectional_window, causal_window, no_intrarow")
+    parser.add_argument("--row_attention_window", type=int, default=4,
+                        help="Window size for bidirectional_window and causal_window modes")
     parser.add_argument("--enable_wandb", action="store_true")
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--local_rank", type=int, default=-1)
