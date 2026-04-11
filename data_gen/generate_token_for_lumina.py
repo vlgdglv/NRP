@@ -29,7 +29,9 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", type=str, default=None, help="Save directory")
     parser.add_argument("--dataset_name", type=str, default="COCO")
     parser.add_argument("--prompt_path", type=str, default=None)
-
+    parser.add_argument("--do_decode_image", action="store_true")
+    parser.add_argument("--do_save_token", action="store_true")
+    parser.add_argument("--json_key", type=str, default="prompt")
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--row_parallel", action="store_true")
     parser.add_argument("--ar_rows", type=int, default=1)
@@ -82,8 +84,8 @@ if __name__ == "__main__":
         lora_path=args.lora_path,
     )
     
-    do_decode_image = False
-    do_save_token = True
+    do_decode_image = args.do_decode_image
+    do_save_token = args.do_save_token
 
     seed = 42
     template_prefix = f"Generate an image of {target_size_w}x{target_size_h} according to the following prompt:\n"
@@ -94,7 +96,7 @@ if __name__ == "__main__":
     
     for offset, item in tqdm(enumerate[Any](all_prompts), total=len(all_prompts), desc="Collecting Stats"):
         idx = offset + args.begin
-        prompt = item["caption"]
+        prompt = item[args.json_key]
         
         full_prompt_text = template_prefix + prompt
         # print(f"full_prompt_text: {full_prompt_text}")

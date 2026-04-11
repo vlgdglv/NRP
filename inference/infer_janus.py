@@ -121,6 +121,7 @@ if __name__ == "__main__":
     summary_dict["cnt"] = 0
     
     anything_dict = None
+    time_cost = []
 
     for idx, desc in enumerate(image_content_prompts):
         prompt = build_prompt(desc, vl_chat_processor)
@@ -163,8 +164,11 @@ if __name__ == "__main__":
                 save_dir=save_dir, save_name_base=f"{idx:02d}-{base}", 
             )
         dt = time.perf_counter() - t0
+        if idx > 2:
+            time_cost.append(dt)
         logger.info(f"[{idx}] {base}  ->  {dt:.2f}s  | saved: {paths[0]}")
     
+    print("Generation time, mean: {}, std: {} (AR rows = {})".format(np.mean(time_cost), np.std(time_cost), args.ar_rows))
     if anything_dict is not None:
         for k, v in summary_dict.items():
             if k != "cnt":

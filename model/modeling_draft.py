@@ -278,14 +278,7 @@ class RowExpertModel(nn.Module):
                 ) * (T * T)
                 output_dict["kd_loss"] = kd_loss.detach()
                 loss = loss + self.kd_weight * kd_loss
-                # kd_self = F.kl_div(
-                #     p_teacher,
-                #     p_teacher,
-                #     reduction="batchmean",
-                # ) * (T * T)
-                # print("kd_loss: ", kd_loss.item(), "kd_self: ", kd_self.item())
-        
-        
+
             if self.use_tv:
                 invalid = -100
                 valid_mask = (labels != invalid)
@@ -310,7 +303,6 @@ class RowExpertModel(nn.Module):
                 
                 T = float(self.acc_temp)
                 p_student = F.softmax(student_logits / T, dim=-1)
-                # log_p_teacher = F.log_softmax(teacher_logits / T, dim=-1)
 
                 acc_loss = -(p_student * log_p_student).sum(dim=1).mean()
                 output_dict["acc_loss"] = acc_loss.detach()

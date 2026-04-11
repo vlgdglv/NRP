@@ -100,7 +100,7 @@ if __name__ == "__main__":
     for offset, item in tqdm(enumerate(all_prompts), total=len(all_prompts), desc="Collecting Stats"):
         idx = offset + args.begin
         prompt = item[args.json_key]
-        img_id = item["image_id"]
+        img_id = item["image_id" if args.dataset_name == "COCO" else "id"]
         full_prompt = build_prompt(prompt, vl_chat_processor)
         # full_prompt_text = prompt
 

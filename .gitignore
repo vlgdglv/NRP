@@ -83,3 +83,5 @@ data_gen/scripts/
 # Claude workspace
 ############################
 .project_cc/
+
+notebooks/

@@ -8,7 +8,7 @@ GPU=$4
 
 CUDA_VISIBLE_DEVICES=$GPU python -m inference.infer_janus \
     --row_parallel \
-    --do_decode --ar_rows 1 \
+    --do_decode --ar_rows $ar_rows \
     --save_name $2 \
     --lora_path training_outputs/janus/$test_lora_name 
     # --with_probe 
