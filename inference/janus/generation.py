@@ -3,7 +3,7 @@ import argparse
 from datetime import datetime
 import torch
 import torch.nn.functional as F
-from inference.sampler import build_row_bidirectional_mask
+from inference.sampler import build_row_bidirectional_mask, build_row_mask
 from utils import rollback_kv_cache
 
 from model.janus_arch.models import MultiModalityCausalLM, VLChatProcessor
@@ -113,8 +113,13 @@ def gererate_row_parallel(
     image_height: int = 24,
     ar_rows: int = 1,
     seed: int = 42,
-    use_bi_mask: bool = True
+    use_bi_mask: bool = True,
+    row_attention_mode: str = None,
+    row_attention_window: int = 4,
 ):
+    # row_attention_mode overrides use_bi_mask for backward compat
+    if row_attention_mode is None:
+        row_attention_mode = "full" if use_bi_mask else "causal"
     generator = torch.Generator(device="cuda").manual_seed(seed)
 
     tokenizer = vl_chat_processor.tokenizer
@@ -184,8 +189,9 @@ def gererate_row_parallel(
         # pos_ids = (torch.arange(W, device=device, dtype=torch.long) + pos_base).unsqueeze(0).expand(2, -1)
         ones = torch.ones(attention_mask.shape[0], step_emb.shape[1], dtype=torch.long, device=input_ids.device)
         attention_mask = torch.cat([attention_mask, ones], dim=-1)
-        if use_bi_mask:
-            final_mask = build_row_bidirectional_mask(attention_mask, step_emb.shape[1]).to(step_emb.dtype)
+        if row_attention_mode != "causal":
+            final_mask = build_row_mask(attention_mask, step_emb.shape[1],
+                                        mode=row_attention_mode, window=row_attention_window).to(step_emb.dtype)
         else:
             final_mask = attention_mask
         out_prop = mmgpt.language_model.model(
@@ -195,15 +201,15 @@ def gererate_row_parallel(
             use_cache=True
         )
         log_q = cfg_merge(mmgpt.gen_head(out_prop.last_hidden_state), cfg_weight).squeeze(0)
-        q_probs  = F.softmax(log_q / (temperature), dim=-1)   
+        q_probs  = F.softmax(log_q / (temperature), dim=-1)
         if do_sample:      # [W, V]
             proposal = torch.multinomial(q_probs, 1, generator=generator).squeeze(-1)      # [W]
         else:
             proposal = q_probs.argmax(dim=-1)
-        
+
         prev_row_embs = list(mmgpt.prepare_gen_img_embeds(proposal.unsqueeze(0).expand(2, -1))[0].unbind(dim=0))
         final_row = proposal.clone()
-    
+
         for c in range(image_width):
             generated_tokens[r * image_width + c] = int(final_row[c])
 
@@ -221,8 +227,13 @@ def gererate_row_parallel_with_probe(
     image_height: int = 24,
     ar_rows: int = 1,
     seed: int = 42,
-    use_bi_mask: bool = True
+    use_bi_mask: bool = True,
+    row_attention_mode: str = None,
+    row_attention_window: int = 4,
 ):
+    # row_attention_mode overrides use_bi_mask for backward compat
+    if row_attention_mode is None:
+        row_attention_mode = "full" if use_bi_mask else "causal"
     generator = torch.Generator(device="cuda").manual_seed(seed)
 
     tokenizer = vl_chat_processor.tokenizer
@@ -294,8 +305,9 @@ def gererate_row_parallel_with_probe(
         step_emb = torch.stack([row_cond, row_cond], dim=0).contiguous() # [2, W, D]
         ones = torch.ones(attention_mask.shape[0], step_emb.shape[1], dtype=torch.long, device=input_ids.device)
         attention_mask = torch.cat([attention_mask, ones], dim=-1)
-        if use_bi_mask:
-            final_mask = build_row_bidirectional_mask(attention_mask, step_emb.shape[1]).to(step_emb.dtype)
+        if row_attention_mode != "causal":
+            final_mask = build_row_mask(attention_mask, step_emb.shape[1],
+                                        mode=row_attention_mode, window=row_attention_window).to(step_emb.dtype)
         else:
             final_mask = attention_mask
         out_prop = mmgpt.language_model.model(

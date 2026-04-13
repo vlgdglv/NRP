@@ -87,6 +87,11 @@ if __name__ == "__main__":
     parser.add_argument("--do_warmup", type=int, default=1)
     parser.add_argument("--infer_count", type=int, default=-1, help="number of inference")
     parser.add_argument("--draft_use_causal_mask", action="store_true")
+    parser.add_argument("--row_attention_mode", type=str, default=None,
+                        choices=["full", "bidirectional_window", "causal_window", "no_intrarow"],
+                        help="Row attention mode for inference (overrides draft_use_causal_mask)")
+    parser.add_argument("--row_attention_window", type=int, default=4,
+                        help="Window size for windowed row attention modes")
     parser.add_argument("--return_anything_dict", action="store_true")
     args = parser.parse_args()
     
@@ -178,7 +183,9 @@ if __name__ == "__main__":
                     block_size=args.block_size,
                     draft_use_causal_mask=args.draft_use_causal_mask,
                     ar_rows=ar_rows,
-                    return_anything_dict=return_anything_dict
+                    return_anything_dict=return_anything_dict,
+                    row_attention_mode=args.row_attention_mode,
+                    row_attention_window=args.row_attention_window,
                 )
             t2.record()
             torch.cuda.synchronize()

@@ -79,6 +79,11 @@ if __name__ == "__main__":
     parser.add_argument("--ar_rows", type=int, default=1)
     parser.add_argument("--infer_count", type=int, default=-1, help="number of inference")
     parser.add_argument("--draft_use_causal_mask", action="store_true")
+    parser.add_argument("--row_attention_mode", type=str, default=None,
+                        choices=["full", "bidirectional_window", "causal_window", "no_intrarow"],
+                        help="Row attention mode for inference (overrides draft_use_causal_mask)")
+    parser.add_argument("--row_attention_window", type=int, default=4,
+                        help="Window size for windowed row attention modes")
     args = parser.parse_args()
     
     model_path = args.model_path
@@ -132,17 +137,21 @@ if __name__ == "__main__":
             
             if not args.with_probe:
                 token_sequence = gererate_row_parallel(
-                    vl_gpt, vl_chat_processor, prompt, 
+                    vl_gpt, vl_chat_processor, prompt,
                     cfg_weight=args.cfg_guidance_scale,
                     ar_rows=args.ar_rows,
-                    seed=42
+                    seed=42,
+                    row_attention_mode=args.row_attention_mode,
+                    row_attention_window=args.row_attention_window,
                 )
             else:
                 token_sequence, anything_dict = gererate_row_parallel_with_probe(
-                    vl_gpt, vl_chat_processor, prompt, 
+                    vl_gpt, vl_chat_processor, prompt,
                     cfg_weight=args.cfg_guidance_scale,
                     ar_rows=args.ar_rows,
-                    seed=42
+                    seed=42,
+                    row_attention_mode=args.row_attention_mode,
+                    row_attention_window=args.row_attention_window,
                 )
                 for k, v in anything_dict.items():
                     if k not in summary_dict.keys():

@@ -225,8 +225,14 @@ class RowParallelSampler(SamplerEngine):
         parallel_as_draft: bool = False,
         draft_use_bi_mask: bool = True,
         block_size: int = 48,
+        row_attention_mode: str = None,
+        row_attention_window: int = 4,
         **kwargs
     ):
+        # row_attention_mode overrides draft_use_bi_mask for backward compat
+        if row_attention_mode is None:
+            row_attention_mode = "full" if draft_use_bi_mask else "causal"
+
         is_prefill = True
         device = input_ids.device
         prefill_length = input_ids.shape[-1]
@@ -330,16 +336,18 @@ class RowParallelSampler(SamplerEngine):
                 ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
                 attention_mask = torch.cat([attention_mask, ones], dim=-1)
 
-                if draft_use_bi_mask:
-                    mask4d = build_row_bidirectional_mask(attention_mask, input_ids.shape[-1])
+                if row_attention_mode != "causal":
+                    mask4d = build_row_mask(attention_mask, input_ids.shape[-1],
+                                            mode=row_attention_mode, window=row_attention_window)
                 else:
+                    mask4d = None
                     logger.warning_once(
                         "Using causal mask in drafting."
                     )
                 blk_output = self.model(
                     input_ids=input_ids,
                     past_key_values=past_key_values,
-                    attention_mask=mask4d if draft_use_bi_mask else attention_mask,
+                    attention_mask=mask4d if mask4d is not None else attention_mask,
                     use_cache=True,
                     return_dict=True,
                 )
@@ -512,8 +520,14 @@ class RowParallelSamplerTester(RowParallelSampler):
         parallel_as_draft: bool = False,
         draft_use_bi_mask: bool = True,
         block_size: int = 48,
+        row_attention_mode: str = None,
+        row_attention_window: int = 4,
         **kwargs
     ):
+        # row_attention_mode overrides draft_use_bi_mask for backward compat
+        if row_attention_mode is None:
+            row_attention_mode = "full" if draft_use_bi_mask else "causal"
+
         anything_dict = {}
         if "return_anything_dict" in kwargs.keys() and kwargs["return_anything_dict"]:
             return_anything_dict = kwargs["return_anything_dict"]
@@ -624,16 +638,18 @@ class RowParallelSamplerTester(RowParallelSampler):
                 ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
                 attention_mask = torch.cat([attention_mask, ones], dim=-1)
 
-                if draft_use_bi_mask:
-                    mask4d = build_row_bidirectional_mask(attention_mask, input_ids.shape[-1])
+                if row_attention_mode != "causal":
+                    mask4d = build_row_mask(attention_mask, input_ids.shape[-1],
+                                            mode=row_attention_mode, window=row_attention_window)
                 else:
+                    mask4d = None
                     logger.warning_once(
                         "Using causal mask in drafting."
                     )
                 blk_output = self.model(
                     input_ids=input_ids,
                     past_key_values=past_key_values,
-                    attention_mask=mask4d if draft_use_bi_mask else attention_mask,
+                    attention_mask=mask4d if mask4d is not None else attention_mask,
                     use_cache=True,
                     return_dict=True,
                 )
@@ -810,5 +826,59 @@ def build_row_bidirectional_mask(attn_mask, row_len):
     neg_inf = torch.finfo(torch.float32).min
     attn = torch.zeros_like(key_valid, dtype=torch.float32)
     attn = attn.masked_fill(~key_valid, neg_inf)
+
+    return attn
+
+
+def build_row_mask(attn_mask, row_len, mode="full", window=4):
+    """
+    Build 4D attention mask for row-parallel inference.
+
+    Starts from full bidirectional (all row tokens see all valid keys),
+    then restricts the intra-row region (last row_len keys) based on mode.
+
+    Modes:
+        "full"                  - original bidirectional (all row tokens see each other)
+        "bidirectional_window"  - token i sees [i-w, i+w] within the row
+        "causal_window"         - token i sees [i-w, i] within the row
+        "no_intrarow"           - token i sees only itself within the row
+
+    Previous context (KV cache) visibility is unchanged in all modes.
+    """
+    # Start with full bidirectional base
+    if attn_mask.dim() == 3:
+        attn_mask3d = attn_mask
+    else:
+        attn_mask3d = attn_mask.unsqueeze(1)
+
+    key_valid = attn_mask3d.to(torch.bool).unsqueeze(2).expand(-1, -1, row_len, -1)
+
+    neg_inf = torch.finfo(torch.float32).min
+    attn = torch.zeros_like(key_valid, dtype=torch.float32)
+    attn = attn.masked_fill(~key_valid, neg_inf)
+
+    if mode == "full":
+        return attn
+
+    # Restrict intra-row attention (the last row_len columns)
+    total_len = attn.shape[-1]
+    row_start = total_len - row_len
+
+    q_idx = torch.arange(row_len, device=attn.device).unsqueeze(1)  # (row_len, 1)
+    k_idx = torch.arange(row_len, device=attn.device).unsqueeze(0)  # (1, row_len)
+
+    if mode == "no_intrarow":
+        intra_visible = (q_idx == k_idx)
+    elif mode == "bidirectional_window":
+        intra_visible = (torch.abs(q_idx - k_idx) <= window)
+    elif mode == "causal_window":
+        intra_visible = (k_idx <= q_idx) & (k_idx >= q_idx - window)
+    else:
+        raise ValueError(f"Unknown row mask mode: {mode}")
+
+    # Mask out non-visible intra-row positions
+    intra_block = attn[:, :, :, row_start:]  # (B, 1, row_len, row_len)
+    intra_block = intra_block.masked_fill(~intra_visible.unsqueeze(0).unsqueeze(0), neg_inf)
+    attn[:, :, :, row_start:] = intra_block
 
     return attn

@@ -362,6 +362,8 @@ class FlexARInferenceSolver:
         block_size:int = None,
         draft_use_causal_mask: bool = False,
         ar_rows: int = 1,
+        row_attention_mode: str = None,
+        row_attention_window: int = 4,
         **kwargs
     ):
         conversations = []
@@ -409,9 +411,11 @@ class FlexARInferenceSolver:
                 cfg_scale=cfg_guidance_scale,
                 seed=seed,
                 block_size=block_size,
-                draft_use_bi_mask=not draft_use_causal_mask, # stupid implementation
+                draft_use_bi_mask=not draft_use_causal_mask, # kept for backward compat
                 ar_rows=ar_rows,
                 return_anything_dict=return_anything_dict,
+                row_attention_mode=row_attention_mode,
+                row_attention_window=row_attention_window,
             )
         
         if return_anything_dict:
