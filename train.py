@@ -166,6 +166,11 @@ def train(args):
         topk_mass_weight=args.topk_mass_weight,
         use_row_rel=use_rel_loss,
         row_rel_weight=args.row_rel_weight,
+        refine_mode=args.refine_mode,
+        refine_weight=args.refine_weight,
+        refine_tau=args.refine_tau,
+        refine_topk=args.refine_topk,
+        refine_full_sequence=args.refine_full_sequence,
     )
     
     if model_name == "janus":
@@ -280,6 +285,18 @@ if __name__ == "__main__":
     parser.add_argument("--topk_mass_weight", type=float, default=1.0)
     parser.add_argument("--topk_mass_topk", type=int, default=64)
     parser.add_argument("--row_rel_weight", type=float, default=1.0)
+    # Two-stage repairable draft training
+    parser.add_argument("--refine_mode", type=str, default="none",
+                        choices=["none", "deterministic_soft_topk", "soft_gumbel", "straight_through_hard"],
+                        help="Draft interface for two-stage refine training")
+    parser.add_argument("--refine_weight", type=float, default=0.1,
+                        help="Weight for refine loss")
+    parser.add_argument("--refine_tau", type=float, default=1.0,
+                        help="Temperature for draft probability computation")
+    parser.add_argument("--refine_topk", type=int, default=128,
+                        help="Top-k for deterministic_soft_topk mode")
+    parser.add_argument("--refine_full_sequence", action="store_true",
+                        help="Replace ALL positions with draft (ablation baseline)")
     parser.add_argument("--use_standard_causal", action="store_true")
     # Row attention mode for research experiments
     parser.add_argument("--row_attention_mode", type=str, default="full",

@@ -28,6 +28,12 @@ class RowExpertModel(nn.Module):
         use_gumbel: bool = False,
         gumbel_weight: float = 1.0,
         gumbel_tau: float = 1.0,
+        # Two-stage repairable draft training
+        refine_mode: str = "none",  # "none", "deterministic_soft_topk", "soft_gumbel", "straight_through_hard"
+        refine_weight: float = 0.1,
+        refine_tau: float = 1.0,
+        refine_topk: int = 128,
+        refine_full_sequence: bool = False,
         use_topk_mass: bool = False,
         topk_mass_topk: int = 64,
         topk_mass_weight: float = 1.0,
@@ -74,6 +80,17 @@ class RowExpertModel(nn.Module):
         self.use_gumbel = use_gumbel
         self.gumbel_weight = gumbel_weight
         self.gumbel_tau = gumbel_tau
+
+        # Two-stage repairable draft: backward compat
+        if use_gumbel and refine_mode == "none":
+            refine_mode = "soft_gumbel"
+            refine_weight = gumbel_weight
+            refine_tau = gumbel_tau
+        self.refine_mode = refine_mode
+        self.refine_weight = refine_weight
+        self.refine_tau = refine_tau
+        self.refine_topk = refine_topk
+        self.refine_full_sequence = refine_full_sequence
 
         self.use_topk_mass = use_topk_mass
         self.topk_mass_topk = topk_mass_topk
@@ -132,6 +149,20 @@ class RowExpertModel(nn.Module):
             else:
                 print(f"Warning: Failed to load LoRA checkpoint: {e}")
 
+    def _compute_draft_probs(self, logits):
+        """Convert student logits to a soft probability distribution for draft embedding."""
+        if self.refine_mode == "deterministic_soft_topk":
+            p = F.softmax(logits / self.refine_tau, dim=-1)
+            topk_vals, topk_idx = p.topk(self.refine_topk, dim=-1)
+            p_masked = torch.zeros_like(p).scatter_(-1, topk_idx, topk_vals)
+            return p_masked / p_masked.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        elif self.refine_mode == "soft_gumbel":
+            return F.gumbel_softmax(logits / self.refine_tau, tau=1.0, hard=False)
+        elif self.refine_mode == "straight_through_hard":
+            return F.gumbel_softmax(logits / self.refine_tau, tau=1.0, hard=True)
+        else:
+            raise ValueError(f"Unknown refine_mode: {self.refine_mode}")
+
     def forward(
         self, 
         input_ids, 
@@ -181,39 +212,77 @@ class RowExpertModel(nn.Module):
                 loss = loss + self.ce_weight * ce_loss
                 output_dict["ce_loss"] = ce_loss.detach()
                 
-            if self.use_gumbel:
-                draft_one_hot = F.gumbel_softmax(student_logits, tau=self.gumbel_tau, hard=False)
-                
-                # embed_weight = self.base_model.get_input_embeddings().weight
-                # draft_embeds = torch.matmul(draft_one_hot, embed_weight)
-                
-                raw_8d_embeds = draft_one_hot @ self.base_model.gen_embed.weight
-                draft_embeds = self.base_model.gen_aligner(raw_8d_embeds)
+            if self.refine_mode != "none":
+                B, L = input_ids.shape
+                device = input_ids.device
+                W = self.image_latent_width
+                H = self.image_latent_height
+
+                # Draft probabilities from student logits
+                draft_probs = self._compute_draft_probs(student_logits)  # [B, L, V_student]
+
+                # Embed draft probs: match the inference embedding pathway
+                # Janus: token → gen_embed(16384,8) → gen_aligner(8→2048)
+                #   so soft draft: draft_probs @ gen_embed.weight → gen_aligner(...)
+                # Lumina: token → embed_tokens(65536,4096), unified vocab
+                #   so soft draft: draft_probs @ embed_tokens.weight
+                if hasattr(self.base_model, 'gen_embed') and hasattr(self.base_model, 'gen_aligner'):
+                    # Janus path: gen_embed → gen_aligner
+                    raw_embeds = draft_probs @ self.base_model.gen_embed.weight  # [B, L, 8]
+                    all_draft_embeds = self.base_model.gen_aligner(raw_embeds)    # [B, L, 2048]
+                else:
+                    # Lumina/unified path: LLM input embeddings
+                    V_student = draft_probs.shape[-1]
+                    embed_weight = self.base_model.get_input_embeddings().weight  # [V_full, D]
+                    all_draft_embeds = draft_probs @ embed_weight[:V_student]     # [B, L, D]
+
+                if self.refine_full_sequence:
+                    # Experiment A baseline: replace ALL positions (broken behavior)
+                    hybrid_embeds = all_draft_embeds
+                else:
+                    # Correct: real embeddings for prefix, draft only at target rows
+                    # For Janus: real prefix uses LLM embeddings (same as training forward)
+                    # Draft rows use gen_embed+gen_aligner (same as inference)
+                    with torch.no_grad():
+                        real_embeds = self.base_model.get_input_embeddings()(input_ids)  # [B, L, D]
+
+                    # Build shifted draft: student logits at row r → embedding for row r+1
+                    shifted_draft = torch.zeros_like(real_embeds)
+                    draft_mask = torch.zeros(B, L, dtype=torch.bool, device=device)
+                    for b in range(B):
+                        valid_pos = (labels[b] != -100).nonzero(as_tuple=False)
+                        if valid_pos.numel() == 0:
+                            continue
+                        img_begin = valid_pos[0].item()
+                        for r in range(H - 1):
+                            src_s = img_begin + r * W
+                            tgt_s = img_begin + (r + 1) * W
+                            shifted_draft[b, tgt_s:tgt_s + W] = all_draft_embeds[b, src_s:src_s + W]
+                            draft_mask[b, tgt_s:tgt_s + W] = True
+
+                    m = draft_mask.unsqueeze(-1)  # [B, L, 1]
+                    hybrid_embeds = torch.where(m, shifted_draft, real_embeds)
+
+                # Refine forward: frozen base model on hybrid input
                 was_training = self.base_model.training
                 self.base_model.eval()
-                
                 with self.base_model.disable_adapter():
                     refine_outputs = self.base_model(
-                        inputs_embeds=draft_embeds,
+                        inputs_embeds=hybrid_embeds,
+                        attention_mask=attention_mask,
                         use_cache=False,
                         output_hidden_states=False,
                     )
-                    l2_logits = refine_outputs.logits
-                
+                    refine_logits = refine_outputs.logits
                 if was_training:
                     self.base_model.train()
-                
-                invalid = -100
-                valid_mask = (labels != invalid)
-                
-                aligned_l2_logits = l2_logits
 
-                l2_logits_v = aligned_l2_logits[valid_mask]
-                labels_v = labels[valid_mask]
-                
-                gumbel_ce_loss = F.cross_entropy(l2_logits_v, labels_v.long())
-                output_dict["gumbel_loss"] = gumbel_ce_loss.detach()
-                loss = loss + self.gumbel_weight * gumbel_ce_loss
+                valid_mask = (labels != -100)
+                refine_loss = F.cross_entropy(
+                    refine_logits[valid_mask], labels[valid_mask].long()
+                )
+                output_dict["refine_loss"] = refine_loss.detach()
+                loss = loss + self.refine_weight * refine_loss
             
             needs_teacher_logits = (
                 self.use_kd or 
