@@ -95,9 +95,17 @@ def calc_generated_clip_score(
     with open("datasets/coco2017_val_prompts.json", "r") as f:
         prompts = json.load(f)
     
+    texts, image_paths = [], []
     # prompts = prompts[:N_SAMPLE]
-    texts = [p["caption"] for p in prompts]
-    image_paths = [os.path.join(image_dir, image_name_fmt.format(p["image_id"])) for p in prompts]
+    for item in prompts:
+        image_id = item["image_id"]
+        image_path = os.path.join(image_dir, image_name_fmt.format(image_id))
+        if os.path.exists(image_path):
+            texts.append(item["caption"])
+            image_paths.append(image_path)
+    # texts = [p["caption"] for p in prompts]
+    # image_paths = [os.path.join(image_dir, image_name_fmt.format(p["image_id"])) for p in prompts]
+    
 
     mean, std = compute_clip_score(image_paths, texts, model_name, pretrained, batch_size, device)
     print("Clip score: mean: {:.4f}, std: {:.4f}".format(mean, std))
@@ -186,14 +194,53 @@ if __name__ == "__main__":
             image_name_fmt="generated_{}.jpg",
             )
     
+    if False:
+        score = fid.compute_fid(
+            "/jizhicfs/pkuhetu/bht/NRP/inference_outputs/janus/COCO_val2017_baseline_argmax",
+            dataset_name="coco2017_val",
+            dataset_split="custom",
+            mode="clean"
+        )
+        print(score)
+        calc_generated_clip_score(
+            model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
+            image_dir="/jizhicfs/pkuhetu/bht/NRP/inference_outputs/janus/COCO_val2017_baseline_argmax",
+            image_name_fmt="generated_{}.jpg",
+            )
+    
     if True:
         # ar_rows = 12
         lora_name = "rk64_lm_ce_e3"
-
-        ar_rows_list = [1,]#[1, 3, 4, 6, 8, 12, 18, 24]
+        model_name = "janus"
+        # model_name = "lumina"
+        
+        ar_rows_list = [1, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
         for ar in ar_rows_list:
             print("--" * 12, "AR = ", ar, "--" * 12)
-            image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/janus/{lora_name}_ar{ar}_cocoval"
+            image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval_argmax"
+            score = fid.compute_fid(
+                image_dir,
+                dataset_name="coco2017_val",
+                dataset_split="custom",
+                mode="clean"
+            )
+            print("FID: ", score)
+            calc_generated_clip_score(
+                model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
+                image_dir=image_dir,
+                image_name_fmt="generated_{}.jpg",
+                )
+                
+    if False:
+        # ar_rows = 12
+        lora_name = "rf_dst_e1_init_rk64_lm_ce_e3"
+        model_name = "janus"
+        # model_name = "lumina"
+        
+        ar_rows_list = [1, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
+        for ar in ar_rows_list:
+            print("--" * 12, "AR = ", ar, "--" * 12)
+            image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval"
             score = fid.compute_fid(
                 image_dir,
                 dataset_name="coco2017_val",

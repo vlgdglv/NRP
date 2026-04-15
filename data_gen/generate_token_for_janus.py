@@ -33,9 +33,14 @@ if __name__ == "__main__":
     parser.add_argument("--prompt_path", type=str, default=None)
 
     parser.add_argument("--lora_path", type=str, default=None)
+    parser.add_argument("--argmax", action="store_true")
     parser.add_argument("--row_parallel", action="store_true")
     parser.add_argument("--ar_rows", type=int, default=1)
-    
+    parser.add_argument("--row_attention_mode", type=str, default=None,
+                    choices=["full", "bidirectional_window", "causal_window", "no_intrarow"],
+                    help="Row attention mode for inference (overrides draft_use_causal_mask)")
+    parser.add_argument("--row_attention_window", type=int, default=4,
+                        help="Window size for windowed row attention modes")
     parser.add_argument("--include_prefill", action="store_true")
     parser.add_argument("--do_decode_image", action="store_true")
     parser.add_argument("--do_save_token", action="store_true")
@@ -113,7 +118,10 @@ if __name__ == "__main__":
                     vl_gpt, vl_chat_processor, full_prompt, 
                     cfg_weight=cfg_guidance_scale,
                     ar_rows=args.ar_rows,
-                    seed=42
+                    seed=42,
+                    do_sample=not args.argmax,
+                    row_attention_mode=args.row_attention_mode,
+                    row_attention_window=args.row_attention_window,
                 )
             else:
                 returns = generate(
@@ -121,7 +129,8 @@ if __name__ == "__main__":
                     image_token_num_per_image=image_token_num_per_image,
                     cfg_weight=cfg_guidance_scale,
                     seed=42,
-                    include_prefill=include_prefill
+                    include_prefill=include_prefill,
+                    do_sample=not args.argmax
                 )
         torch.cuda.synchronize()
 

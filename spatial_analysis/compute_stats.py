@@ -70,20 +70,16 @@ def extract_image_tokens_lumina(token_seq: torch.Tensor, H: int = 48, W: int = 4
 
 def extract_image_tokens_janus(token_seq: torch.Tensor, H: int = 24, W: int = 24,
                                 eoi_token_id: int = 151847) -> Optional[torch.Tensor]:
-    """Extract image tokens from Janus/Emu3 token sequence."""
+    """Extract image tokens from Janus token sequence.
+    Janus stores image tokens as the last H*W tokens in the sequence."""
     img_length = H * W
-
-    eoi_positions = (token_seq == eoi_token_id).nonzero(as_tuple=False)
-    if eoi_positions.numel() == 0:
-        return None
-
-    eoi_pos = int(eoi_positions[0].item())
-    img_start = eoi_pos - img_length
+    L = token_seq.shape[-1]
+    img_start = L - img_length
 
     if img_start < 0:
         return None
 
-    img_tokens = token_seq[img_start:eoi_pos]
+    img_tokens = token_seq[img_start:L]
     return img_tokens.reshape(H, W)
 
 def compute_equality_stats(grid: np.ndarray) -> dict:

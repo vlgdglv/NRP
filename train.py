@@ -289,11 +289,11 @@ if __name__ == "__main__":
     parser.add_argument("--refine_mode", type=str, default="none",
                         choices=["none", "deterministic_soft_topk", "soft_gumbel", "straight_through_hard"],
                         help="Draft interface for two-stage refine training")
-    parser.add_argument("--refine_weight", type=float, default=0.1,
+    parser.add_argument("--refine_weight", type=float, default=1.0,
                         help="Weight for refine loss")
     parser.add_argument("--refine_tau", type=float, default=1.0,
                         help="Temperature for draft probability computation")
-    parser.add_argument("--refine_topk", type=int, default=128,
+    parser.add_argument("--refine_topk", type=int, default=256,
                         help="Top-k for deterministic_soft_topk mode")
     parser.add_argument("--refine_full_sequence", action="store_true",
                         help="Replace ALL positions with draft (ablation baseline)")

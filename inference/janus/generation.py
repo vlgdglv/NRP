@@ -59,7 +59,8 @@ def generate(
     cfg_weight: float = 5.0,
     image_token_num_per_image: int = 576,
     seed: int = 42,
-    include_prefill: bool = False
+    include_prefill: bool = False,
+    do_sample: bool = True,
 ):
     generator = torch.Generator(device="cuda").manual_seed(seed)
 
@@ -86,7 +87,10 @@ def generate(
         logits = logit_uncond + cfg_weight * (logit_cond-logit_uncond)
         probs = torch.softmax(logits / temperature, dim=-1)
 
-        next_token = torch.multinomial(probs, num_samples=1, generator=generator)
+        if do_sample:
+            next_token = torch.multinomial(probs, num_samples=1, generator=generator)
+        else:
+            next_token = torch.argmax(probs, dim=-1, keepdim=True)
         generated_tokens[:, i] = next_token.squeeze(dim=-1)
         
         next_token = torch.cat([next_token.unsqueeze(dim=1), next_token.unsqueeze(dim=1)], dim=1).view(-1)

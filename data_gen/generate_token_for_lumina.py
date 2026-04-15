@@ -34,6 +34,11 @@ if __name__ == "__main__":
     parser.add_argument("--json_key", type=str, default="prompt")
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--row_parallel", action="store_true")
+    parser.add_argument("--row_attention_mode", type=str, default=None,
+                    choices=["full", "bidirectional_window", "causal_window", "no_intrarow"],
+                    help="Row attention mode for inference (overrides draft_use_causal_mask)")
+    parser.add_argument("--row_attention_window", type=int, default=4,
+                        help="Window size for windowed row attention modes")
     parser.add_argument("--ar_rows", type=int, default=1)
     args = parser.parse_args()
     
@@ -97,7 +102,7 @@ if __name__ == "__main__":
     for offset, item in tqdm(enumerate[Any](all_prompts), total=len(all_prompts), desc="Collecting Stats"):
         idx = offset + args.begin
         prompt = item[args.json_key]
-        
+        img_id = item["image_id" if args.dataset_name == "COCO" else "id"]
         full_prompt_text = template_prefix + prompt
         # print(f"full_prompt_text: {full_prompt_text}")
         time_start = time.time()
@@ -116,6 +121,8 @@ if __name__ == "__main__":
                     block_size=block_size,
                     draft_use_causal_mask=False,
                     ar_rows=args.ar_rows,
+                    row_attention_mode=args.row_attention_mode,
+                    row_attention_window=args.row_attention_window,
                 )
             else:
                 returns = inference_solver.collect_tokens(
@@ -140,7 +147,7 @@ if __name__ == "__main__":
             generated = returns
             a1, new_image = generated[0], generated[1][0]
             result_image = inference_solver.create_image_grid([new_image], 1, 1)
-            result_image.save(save_stats_dir / f"image_sample_{idx}.png")
+            result_image.save(save_stats_dir / f"generated_{img_id}.jpg")
         else:
             tokens_sequence = returns
             

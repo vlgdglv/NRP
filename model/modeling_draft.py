@@ -230,12 +230,15 @@ class RowExpertModel(nn.Module):
                     # Janus path: gen_embed → gen_aligner
                     raw_embeds = draft_probs @ self.base_model.gen_embed.weight  # [B, L, 8]
                     all_draft_embeds = self.base_model.gen_aligner(raw_embeds)    # [B, L, 2048]
+                    with torch.no_grad():
+                        real_embeds = self.base_model.language_model.get_input_embeddings()(input_ids)  # [B, L, D]
                 else:
                     # Lumina/unified path: LLM input embeddings
                     V_student = draft_probs.shape[-1]
-                    embed_weight = self.base_model.get_input_embeddings().weight  # [V_full, D]
+                    embed_weight = self.base_model.get_input_embeddings().weight.to(device=draft_probs.device, dtype=draft_probs.dtype) # [V_full, D]
                     all_draft_embeds = draft_probs @ embed_weight[:V_student]     # [B, L, D]
-
+                    with torch.no_grad():
+                        real_embeds = self.base_model.get_input_embeddings()(input_ids)  # [B, L, D]
                 if self.refine_full_sequence:
                     # Experiment A baseline: replace ALL positions (broken behavior)
                     hybrid_embeds = all_draft_embeds
@@ -243,8 +246,6 @@ class RowExpertModel(nn.Module):
                     # Correct: real embeddings for prefix, draft only at target rows
                     # For Janus: real prefix uses LLM embeddings (same as training forward)
                     # Draft rows use gen_embed+gen_aligner (same as inference)
-                    with torch.no_grad():
-                        real_embeds = self.base_model.get_input_embeddings()(input_ids)  # [B, L, D]
 
                     # Build shifted draft: student logits at row r → embedding for row r+1
                     shifted_draft = torch.zeros_like(real_embeds)
@@ -269,7 +270,7 @@ class RowExpertModel(nn.Module):
                 with self.base_model.disable_adapter():
                     refine_outputs = self.base_model(
                         inputs_embeds=hybrid_embeds,
-                        attention_mask=attention_mask,
+                        attention_mask=None,
                         use_cache=False,
                         output_hidden_states=False,
                     )
