@@ -359,6 +359,7 @@ class FlexARInferenceSolver:
         cfg_guidance_scale=None,
         logits_processor=None,
         seed: int = None,
+        do_sample: bool = True,
         block_size:int = None,
         draft_use_causal_mask: bool = False,
         ar_rows: int = 1,
@@ -410,6 +411,7 @@ class FlexARInferenceSolver:
                 do_cfg=True,
                 cfg_scale=cfg_guidance_scale,
                 seed=seed,
+                do_sample=do_sample,
                 block_size=block_size,
                 draft_use_bi_mask=not draft_use_causal_mask, # kept for backward compat
                 ar_rows=ar_rows,
@@ -420,7 +422,7 @@ class FlexARInferenceSolver:
         
         if return_anything_dict:
             token_sequence, anything_dict = token_sequence
-        print(token_sequence.shape)
+        
         image_tokens = token_sequence[0][prompt_len:-1].tolist()
 
         if return_anything_dict:
@@ -508,6 +510,7 @@ class FlexARInferenceSolver:
         qas,
         max_gen_len,
         temperature,
+        do_sample=True,
         cfg_guidance_scale=None,
         logits_processor=None,
         seed: int = None,
@@ -535,7 +538,7 @@ class FlexARInferenceSolver:
             max_length=self.model.config.max_position_embeddings,
             temperature=temperature,
             top_k=None,
-            do_sample=True,
+            do_sample=do_sample,
             eos_token_id=[8710],
         )
 
@@ -567,6 +570,7 @@ class FlexARInferenceSolver:
                 temperature=temperature,
                 max_length=max_gen_len,
                 eos_token_id=8710,
+                do_sample=do_sample,
                 do_cfg=True,
                 cfg_scale=cfg_guidance_scale,
                 seed=seed,

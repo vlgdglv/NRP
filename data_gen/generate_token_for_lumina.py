@@ -34,6 +34,7 @@ if __name__ == "__main__":
     parser.add_argument("--json_key", type=str, default="prompt")
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--row_parallel", action="store_true")
+    parser.add_argument("--argmax", action="store_true")
     parser.add_argument("--row_attention_mode", type=str, default=None,
                     choices=["full", "bidirectional_window", "causal_window", "no_intrarow"],
                     help="Row attention mode for inference (overrides draft_use_causal_mask)")
@@ -118,6 +119,7 @@ if __name__ == "__main__":
                     cfg_guidance_scale=cfg_guidance_scale,
                     logits_processor=inference_solver.create_logits_processor(cfg=cfg_guidance_scale, image_top_k=image_top_k),
                     seed=seed,
+                    do_sample=not args.argmax,
                     block_size=block_size,
                     draft_use_causal_mask=False,
                     ar_rows=args.ar_rows,
@@ -130,6 +132,7 @@ if __name__ == "__main__":
                     qas=[[full_prompt_text, None]],
                     max_gen_len=8192,
                     temperature=1.0,
+                    do_sample=not args.argmax,
                     cfg_guidance_scale=cfg_guidance_scale,
                     logits_processor=inference_solver.create_logits_processor(cfg=cfg_guidance_scale, image_top_k=image_top_k),
                     seed=seed,
@@ -143,8 +146,10 @@ if __name__ == "__main__":
 
         if do_decode_image:
             logger.info(f"Image {offset} generation time elapsed: {time_uesd:.2f} s)")
-            # tokens_sequence, generated = returns
-            generated = returns
+            if args.row_parallel:
+                generated = returns
+            else:
+                tokens_sequence, generated = returns
             a1, new_image = generated[0], generated[1][0]
             result_image = inference_solver.create_image_grid([new_image], 1, 1)
             result_image.save(save_stats_dir / f"generated_{img_id}.jpg")

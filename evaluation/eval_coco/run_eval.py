@@ -209,12 +209,26 @@ if __name__ == "__main__":
             )
     
     if True:
+        score = fid.compute_fid(
+            "/jizhicfs/pkuhetu/bht/NRP/inference_outputs/lumina/COCO_val2017_baseline_argmax",
+            dataset_name="coco2017_val",
+            dataset_split="custom",
+            mode="clean"
+        )
+        print(score)
+        calc_generated_clip_score(
+            model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
+            image_dir="/jizhicfs/pkuhetu/bht/NRP/inference_outputs/lumina/COCO_val2017_baseline_argmax",
+            image_name_fmt="generated_{}.jpg",
+            )
+
+    if False:
         # ar_rows = 12
         lora_name = "rk64_lm_ce_e3"
         model_name = "janus"
         # model_name = "lumina"
         
-        ar_rows_list = [1, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
+        ar_rows_list = [6, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
         for ar in ar_rows_list:
             print("--" * 12, "AR = ", ar, "--" * 12)
             image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval_argmax"
@@ -233,14 +247,14 @@ if __name__ == "__main__":
                 
     if False:
         # ar_rows = 12
-        lora_name = "rf_dst_e1_init_rk64_lm_ce_e3"
-        model_name = "janus"
-        # model_name = "lumina"
+        lora_name = "rk64_lm_ce_acc_topkm_e5"
+        # model_name = "janus"
+        model_name = "lumina"
         
-        ar_rows_list = [1, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
+        ar_rows_list = [4, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
         for ar in ar_rows_list:
             print("--" * 12, "AR = ", ar, "--" * 12)
-            image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval"
+            image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval_argmax"
             score = fid.compute_fid(
                 image_dir,
                 dataset_name="coco2017_val",

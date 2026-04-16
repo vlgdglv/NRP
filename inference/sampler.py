@@ -370,6 +370,7 @@ class RowParallelSampler(SamplerEngine):
                     ).view(1, -1)
                 else:
                     next_blk_token = torch.argmax(scores, dim=-1, keepdim=True)
+                    next_blk_token = next_blk_token.view(-1, next_blk_token.shape[1])
 
                 if not parallel_as_draft:
                     generated_tokens.append(next_blk_token)
