@@ -122,9 +122,9 @@ if __name__ == "__main__":
         precision=args.dtype,
         target_size=target_size,
         device = device,
-        row_parallel=row_parallel or args.verify,
+        row_parallel=row_parallel,
         lora_path=lora_path,
-        return_anything_dict=return_anything_dict or args.verify,
+        return_anything_dict=return_anything_dict,
         verify_mode=args.verify,
     )
 
@@ -172,7 +172,7 @@ if __name__ == "__main__":
             t1 = torch.cuda.Event(enable_timing=True)
             t2 = torch.cuda.Event(enable_timing=True)
             torch.cuda.synchronize()
-
+            print(prompt_text)
             t1.record()
             with torch.no_grad():
                 generated = inference_solver.generate(

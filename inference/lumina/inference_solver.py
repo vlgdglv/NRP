@@ -336,6 +336,7 @@ class FlexARInferenceSolver:
             else:
                 cls_name = RowParallelSampler
             # self.sampler = RowParallelSamplerTester(
+            print(cls_name)
             self.sampler = cls_name(
             # self.sampler = RowParallelWithVerifySampler(
                 lora_model,

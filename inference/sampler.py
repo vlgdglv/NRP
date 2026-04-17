@@ -8,6 +8,7 @@ from transformers.generation.logits_process import LogitsProcessor, LogitsProces
 from transformers.cache_utils import DynamicCache
 # from peft import set_adapter, disable_adapter
 
+import torch.nn.functional as F
 from utils.logger import get_logger
 from utils import rollback_kv_cache, snapshot_kv_cache
 
@@ -885,6 +886,338 @@ def build_row_mask(attn_mask, row_len, mode="full", window=4):
 
 
 class RowVerifySampler(RowParallelSampler):
+    """
+    Safe-first verifier:
+      1) LoRA drafts a full row
+      2) Verify row left-to-right in small chunks with relaxed teacher score
+      3) If a chunk is rejected, DO NOT repaint / keep stale future chunks
+         -> fallback to base model for the rest of this row
+    """
+
+    # -----------------------------
+    # helpers
+    # -----------------------------
+    def _merge_cfg_logits(self, logits, do_cfg: bool, cfg_scale: float):
+        if not do_cfg:
+            return logits
+        cond, uncond = logits.chunk(2, dim=0)
+        return uncond + cfg_scale * (cond - uncond)
+
+    def _sample_scores(
+        self,
+        scores: torch.Tensor,
+        temperature: float,
+        do_sample: bool,
+    ) -> torch.LongTensor:
+        # scores: [1, T, V]
+        if do_sample:
+            probs = torch.softmax(scores / temperature, dim=-1)
+            sampled = torch.multinomial(
+                probs.view(-1, probs.shape[-1]),
+                num_samples=1,
+                generator=self.generator,
+            ).view(scores.shape[0], scores.shape[1])
+            return sampled
+        else:
+            return torch.argmax(scores, dim=-1)
+
+    def _append_tokens_with_base(
+        self,
+        token_sequence: torch.LongTensor,
+        past_key_values,
+        attention_mask: torch.Tensor,
+        tokens: torch.LongTensor,   # [1, L]
+        do_cfg: bool,
+    ):
+        if tokens.numel() == 0:
+            return token_sequence, past_key_values, attention_mask
+
+        model_input = tokens.repeat(2, 1) if do_cfg else tokens
+        ones = torch.ones(
+            model_input.shape[0], 1, model_input.shape[-1],
+            dtype=attention_mask.dtype,
+            device=attention_mask.device,
+        )
+        attention_mask = torch.cat([attention_mask, ones], dim=-1)
+
+        with self.model.disable_adapter():
+            out = self.model(
+                input_ids=model_input,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+
+        past_key_values = out.past_key_values
+        token_sequence = torch.cat([token_sequence, tokens], dim=-1)
+        return token_sequence, past_key_values, attention_mask
+
+    def _base_decode_n_tokens(
+        self,
+        token_sequence: torch.LongTensor,
+        past_key_values,
+        attention_mask: torch.Tensor,
+        n_tokens: int,
+        logits_processor: LogitsProcessorList,
+        temperature: float,
+        do_sample: bool,
+        do_cfg: bool,
+        cfg_scale: float,
+    ):
+        """
+        Conservative fallback: decode the next n tokens with base model only.
+        """
+        if n_tokens <= 0:
+            return token_sequence, past_key_values, attention_mask
+
+        input_ids = token_sequence[:, -1:]
+        input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
+
+        with self.model.disable_adapter():
+            for _ in range(n_tokens):
+                ones = torch.ones(
+                    input_ids.shape[0], 1, input_ids.shape[-1],
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                attention_mask = torch.cat([attention_mask, ones], dim=-1)
+
+                next_token, outputs = self._forward_and_sample(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    temperature=temperature,
+                    logits_processor=logits_processor,
+                    token_sequence=token_sequence,
+                    do_sample=do_sample,
+                    do_cfg=do_cfg,
+                    cfg_scale=cfg_scale,
+                    is_prefill=False,
+                )
+                past_key_values = outputs.past_key_values
+                token_sequence = torch.cat([token_sequence, next_token], dim=-1)
+                input_ids = next_token.repeat(2, 1) if do_cfg else next_token
+
+        return token_sequence, past_key_values, attention_mask
+
+    def _draft_full_row(
+        self,
+        token_sequence: torch.LongTensor,
+        past_key_values,
+        attention_mask: torch.Tensor,
+        logits_processor: LogitsProcessorList,
+        temperature: float,
+        do_sample: bool,
+        do_cfg: bool,
+        cfg_scale: float,
+        block_size: int,
+        num_blocks_per_row: int,
+        row_attention_mode: str,
+        row_attention_window: int,
+        device,
+    ):
+        """
+        Keep your original LoRA row proposal logic, but run it on snapshots so
+        the real cache/state is untouched.
+        Returns: draft_row [1, img_w + 1] (image tokens + EOL)
+        """
+        kv_seq_len = past_key_values.get_seq_length()
+        local_kv = snapshot_kv_cache(past_key_values, kv_seq_len)
+        local_mask = attention_mask.clone()
+
+        # same as your original code
+        draft_input_ids = token_sequence[:, -(block_size + 1):-1]
+        draft_tokens_list = []
+
+        for blk in range(num_blocks_per_row):
+            blk_input = draft_input_ids
+            if blk == num_blocks_per_row - 1:
+                blk_input = torch.cat([blk_input, self.image_end_line_token_tensor], dim=-1)
+
+            model_input = blk_input.repeat(2, 1) if do_cfg else blk_input
+
+            ones = torch.ones(
+                model_input.shape[0], 1, model_input.shape[1],
+                dtype=torch.long, device=device
+            )
+            local_mask = torch.cat([local_mask, ones], dim=-1)
+
+            if row_attention_mode != "causal":
+                mask4d = build_row_mask(
+                    local_mask,
+                    model_input.shape[-1],
+                    mode=row_attention_mode,
+                    window=row_attention_window,
+                )
+            else:
+                mask4d = None
+
+            out = self.model(
+                input_ids=model_input,
+                past_key_values=local_kv,
+                attention_mask=mask4d if mask4d is not None else local_mask,
+                use_cache=True,
+                return_dict=True,
+            )
+            local_kv = out.past_key_values
+
+            logits = self._merge_cfg_logits(out.logits, do_cfg, cfg_scale)
+            scores = logits_processor(token_sequence, logits)
+            draft_blk = self._sample_scores(scores, temperature, do_sample)  # [1, L]
+
+            draft_tokens_list.append(draft_blk)
+            draft_input_ids = draft_blk
+
+        draft_row = torch.cat(draft_tokens_list, dim=-1)
+        return draft_row
+
+    def _score_chunk_relaxed(
+        self,
+        token_sequence: torch.LongTensor,
+        past_key_values,
+        attention_mask: torch.Tensor,
+        chunk_tokens: torch.LongTensor,   # [1, L]
+        logits_processor: LogitsProcessorList,
+        do_cfg: bool,
+        cfg_scale: float,
+        verify_rank_k: int,
+        verify_mean_logprob_thresh: float,
+        verify_min_logprob_thresh: float,
+        verify_topk_frac_thresh: float,
+    ):
+        """
+        Teacher-force this chunk through BASE model on a snapshot, then score it
+        with relaxed criteria instead of exact token match.
+        """
+        teacher_input = chunk_tokens.repeat(2, 1) if do_cfg else chunk_tokens
+        local_mask = attention_mask.clone()
+
+        ones = torch.ones(
+            teacher_input.shape[0], 1, teacher_input.shape[1],
+            dtype=torch.long, device=teacher_input.device
+        )
+        local_mask = torch.cat([local_mask, ones], dim=-1)
+
+        with self.model.disable_adapter():
+            out = self.model(
+                input_ids=teacher_input,
+                attention_mask=local_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+
+        logits = self._merge_cfg_logits(out.logits, do_cfg, cfg_scale)
+        scores = logits_processor(token_sequence, logits)    # [1, L, V]
+        logprob = F.log_softmax(scores, dim=-1)
+
+        token_scores = torch.gather(
+            scores, dim=-1, index=chunk_tokens.unsqueeze(-1)
+        ).squeeze(-1)  # [1, L]
+
+        token_logprob = torch.gather(
+            logprob, dim=-1, index=chunk_tokens.unsqueeze(-1)
+        ).squeeze(-1)  # [1, L]
+
+        # rank = 1 + #classes with larger score
+        ranks = (scores > token_scores.unsqueeze(-1)).sum(dim=-1) + 1  # [1, L]
+
+        mean_logprob = token_logprob.mean().item()
+        min_logprob = token_logprob.min().item()
+        topk_frac = (ranks <= verify_rank_k).float().mean().item()
+
+        accepted = (
+            (mean_logprob >= verify_mean_logprob_thresh)
+            and (min_logprob >= verify_min_logprob_thresh)
+            and (topk_frac >= verify_topk_frac_thresh)
+        )
+
+        stats = {
+            "mean_logprob": mean_logprob,
+            "min_logprob": min_logprob,
+            "topk_frac": topk_frac,
+            "avg_rank": ranks.float().mean().item(),
+            "accepted": accepted,
+        }
+        return accepted, stats
+
+    def _score_chunk_group_relaxed(
+        self,
+        token_sequence,
+        past_key_values,
+        attention_mask,
+        chunk_tokens,
+        logits_processor,
+        do_cfg,
+        cfg_scale,
+        teacher_topm=4,
+        neighbor_topk=16,
+        chunk_accept_frac=0.6,
+    ):
+        teacher_input = chunk_tokens.repeat(2, 1) if do_cfg else chunk_tokens
+        local_mask = attention_mask.clone()
+
+        ones = torch.ones(
+            teacher_input.shape[0], 1, teacher_input.shape[1],
+            dtype=torch.long, device=teacher_input.device
+        )
+        local_mask = torch.cat([local_mask, ones], dim=-1)
+
+        with self.model.disable_adapter():
+            out = self.model(
+                input_ids=teacher_input,
+                attention_mask=local_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+
+        logits = self._merge_cfg_logits(out.logits, do_cfg, cfg_scale)
+        scores = logits_processor(token_sequence, logits)   # [1, L, V]
+
+        teacher_topm_idx = scores.topk(k=teacher_topm, dim=-1).indices   # [1,L,M]
+
+        accepted_pos = []
+        avg_rank = []
+
+        for i in range(chunk_tokens.shape[1]):
+            cand = chunk_tokens[0, i].item()
+            topm = teacher_topm_idx[0, i]   # [M]
+
+            ok = False
+            for t in topm.tolist():
+                neigh = self.token_neighbors[t, :neighbor_topk]
+                if (neigh == cand).any():
+                    ok = True
+                    break
+            accepted_pos.append(float(ok))
+
+            cand_score = scores[0, i, cand]
+            rank = (scores[0, i] > cand_score).sum().item() + 1
+            avg_rank.append(rank)
+
+        accept_frac = sum(accepted_pos) / len(accepted_pos)
+        mean_rank = sum(avg_rank) / len(avg_rank)
+
+        accepted = accept_frac >= chunk_accept_frac
+        stats = {
+            "accept_frac": accept_frac,
+            "avg_rank": mean_rank,
+            "accepted": accepted,
+        }
+        return accepted, stats
+
+    def _build_token_neighbors(self, topk=32):
+        W = self.base_model.gen_embed.weight.detach()   # [V, D]
+        W = F.normalize(W, dim=-1)
+        sim = W @ W.T
+        neigh = sim.topk(k=topk, dim=-1).indices   # [V, topk]
+        self.token_neighbors = neigh
+        
+    # -----------------------------
+    # main sample
+    # -----------------------------
     def sample(
         self,
         input_ids: torch.LongTensor,
@@ -900,9 +1233,18 @@ class RowVerifySampler(RowParallelSampler):
         use_cache: bool = True,
         ar_rows: int = 1,
         draft_use_bi_mask: bool = True,
-        block_size: int = 48,
+        block_size: int = 48,                 # keep as row-draft unit (typically full row width)
         row_attention_mode: str = None,
         row_attention_window: int = 4,
+
+        # NEW verify knobs
+        verify_chunk_size: int = 4,
+        verify_rank_k: int = 8,
+        verify_mean_logprob_thresh: float = -3.0,
+        verify_min_logprob_thresh: float = -7.0,
+        verify_topk_frac_thresh: float = 0.75,
+        verify_tail_fallback: str = "base",  # "base" only for now; safe-first
+        verify_fallback_do_sample: bool = False,
         **kwargs
     ):
         if row_attention_mode is None:
@@ -922,7 +1264,6 @@ class RowVerifySampler(RowParallelSampler):
 
         input_ids = input_ids.contiguous()
         token_sequence = input_ids
-
         past_key_values = DynamicCache() if use_cache else None
 
         attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
@@ -934,7 +1275,9 @@ class RowVerifySampler(RowParallelSampler):
             attention_mask = attention_mask.repeat(2, 1, 1)
             attention_mask[1::2, :, :prefill_length - 1] = 0
 
-        # ── Phase 1: AR rows with base model ──
+        # ------------------------------------------------
+        # Phase 1: AR rows with base model
+        # ------------------------------------------------
         with self.model.disable_adapter():
             while True:
                 next_token, outputs = self._forward_and_sample(
@@ -945,173 +1288,211 @@ class RowVerifySampler(RowParallelSampler):
                 past_key_values = outputs.past_key_values
                 token_sequence = torch.cat([token_sequence, next_token], dim=-1)
                 input_ids = next_token.repeat(2, 1) if do_cfg else next_token
-                ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
+                ones = torch.ones(
+                    input_ids.shape[0], 1, input_ids.shape[-1],
+                    dtype=attention_mask.dtype, device=attention_mask.device
+                )
                 attention_mask = torch.cat([attention_mask, ones], dim=-1)
                 is_prefill = False
+
                 img_pos_info = self._get_decoding_position(token_sequence)
                 if img_pos_info["is_in_image"]:
                     if img_pos_info["is_end_of_line"] and img_pos_info["num_of_lines"] >= ar_rows:
                         break
 
-            # fill kv cache for the last EOL token
+            # fill kv for last EOL token
             outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
-                use_cache=True, return_dict=True,
+                use_cache=True,
+                return_dict=True,
             )
             past_key_values = outputs.past_key_values
 
         assert self.img_h is not None and self.img_w is not None
         remain_rows = self.img_h - ar_rows
-        assert self.img_w % block_size == 0
+        assert self.img_w % block_size == 0, "block_size should match your trained row draft unit"
         num_blocks_per_row = self.img_w // block_size
+
+        assert self.img_w % verify_chunk_size == 0, "verify_chunk_size should divide row width"
 
         verify_total = 0
         verify_accepted = 0
         verify_corrected_rows = 0
+        verify_rejected_chunks = 0
+        verify_accept_chunks = 0
 
-        # ── Phase 2: Verify-and-correct loop ──
+        verify_accept_logp = []
+        verify_reject_logp = []
+
+        # ------------------------------------------------
+        # Phase 2: safe-first row verify
+        # ------------------------------------------------
         for row_idx in range(remain_rows):
-            kv_seq_len = past_key_values.get_seq_length()
-            kv_snapshot = snapshot_kv_cache(past_key_values, kv_seq_len)
-            mask_snapshot = attention_mask.clone()
+            # 1) LoRA drafts FULL row once (same row-level draft as before)
+            draft_row = self._draft_full_row(
+                token_sequence=token_sequence,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                logits_processor=logits_processor,
+                temperature=temperature,
+                do_sample=do_sample,
+                do_cfg=do_cfg,
+                cfg_scale=cfg_scale,
+                block_size=block_size,
+                num_blocks_per_row=num_blocks_per_row,
+                row_attention_mode=row_attention_mode,
+                row_attention_window=row_attention_window,
+                device=device,
+            )
 
-            # 2a. LoRA proposes full row (block by block, same as parent)
-            draft_input_ids = token_sequence[:, -(block_size + 1):-1]
-            draft_tokens_list = []
+            draft_img = draft_row[:, :self.img_w]   # verify image tokens only
+            row_had_reject = False
 
-            for blk in range(num_blocks_per_row):
-                blk_input = draft_input_ids
-                if blk == num_blocks_per_row - 1:
-                    blk_input = torch.cat([blk_input, self.image_end_line_token_tensor], dim=-1)
-                blk_input = blk_input.repeat(2, 1) if do_cfg else blk_input
+            # anchor the first chunk with base model, do not verify it
+            anchor = verify_chunk_size
+            token_sequence, past_key_values, attention_mask = self._base_decode_n_tokens(
+                token_sequence=token_sequence,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                n_tokens=anchor,
+                logits_processor=logits_processor,
+                temperature=temperature,
+                do_sample=False,   # anchor稳一点
+                do_cfg=do_cfg,
+                cfg_scale=cfg_scale,
+            )
 
-                ones = torch.ones(blk_input.shape[0], 1, blk_input.shape[1], dtype=torch.long, device=device)
-                attention_mask = torch.cat([attention_mask, ones], dim=-1)
+            # 2) Frontier chunk verify
+            for start in range(anchor, self.img_w, verify_chunk_size):
+                end = start + verify_chunk_size
+                chunk = draft_img[:, start:end]
 
-                if row_attention_mode != "causal":
-                    mask4d = build_row_mask(attention_mask, blk_input.shape[-1],
-                                            mode=row_attention_mode, window=row_attention_window)
-                else:
-                    mask4d = None
+                kv_seq_len = past_key_values.get_seq_length()
+                kv_snapshot = snapshot_kv_cache(past_key_values, kv_seq_len)
+                mask_snapshot = attention_mask.clone()
 
-                blk_out = self.model(
-                    input_ids=blk_input,
-                    past_key_values=past_key_values,
-                    attention_mask=mask4d if mask4d is not None else attention_mask,
-                    use_cache=True, return_dict=True,
+                accepted, stats = self._score_chunk_group_relaxed(
+                    token_sequence=token_sequence,
+                    past_key_values=kv_snapshot,
+                    attention_mask=mask_snapshot,
+                    chunk_tokens=chunk,
+                    logits_processor=logits_processor,
+                    do_cfg=do_cfg,
+                    cfg_scale=cfg_scale,
+                    verify_rank_k=verify_rank_k,
+                    verify_mean_logprob_thresh=verify_mean_logprob_thresh,
+                    verify_min_logprob_thresh=verify_min_logprob_thresh,
+                    verify_topk_frac_thresh=verify_topk_frac_thresh,
                 )
-                past_key_values = blk_out.past_key_values
-                blk_logits = blk_out.logits
-                if do_cfg:
-                    cond, uncond = blk_logits.chunk(2, dim=0)
-                    blk_logits = uncond + cfg_scale * (cond - uncond)
-                scores = logits_processor(token_sequence, blk_logits)
 
-                if do_sample:
-                    probs = torch.nn.functional.softmax(scores / temperature, dim=-1)
-                    draft_blk = torch.multinomial(
-                        probs.view(-1, probs.shape[-1]), num_samples=1,
-                        generator=self.generator,
-                    ).view(1, -1)
+                verify_total += chunk.shape[-1]
+
+                if accepted:
+                    verify_accepted += chunk.shape[-1]
+                    verify_accept_chunks += 1
+                    verify_accept_logp.append(stats["mean_logprob"])
+
+                    # commit accepted chunk with BASE model cache
+                    token_sequence, past_key_values, attention_mask = self._append_tokens_with_base(
+                        token_sequence=token_sequence,
+                        past_key_values=past_key_values,
+                        attention_mask=attention_mask,
+                        tokens=chunk,
+                        do_cfg=do_cfg,
+                    )
                 else:
-                    draft_blk = torch.argmax(scores, dim=-1, keepdim=True).view(1, -1)
+                    row_had_reject = True
+                    verify_corrected_rows += 1
+                    verify_rejected_chunks += 1
+                    verify_reject_logp.append(stats["mean_logprob"])
 
-                draft_tokens_list.append(draft_blk)
-                draft_input_ids = draft_blk
+                    # SAFE-FIRST POLICY:
+                    # Once current frontier chunk is rejected,
+                    # do NOT keep future stale draft chunks.
+                    # Fall back to base model for the rest of this row.
+                    # only fallback current chunk
+                    chunk_len = end - start
+                    token_sequence, past_key_values, attention_mask = self._base_decode_n_tokens(
+                        token_sequence=token_sequence,
+                        past_key_values=past_key_values,
+                        attention_mask=attention_mask,
+                        n_tokens=chunk_len,
+                        logits_processor=logits_processor,
+                        temperature=temperature,
+                        do_sample=False,
+                        do_cfg=do_cfg,
+                        cfg_scale=cfg_scale,
+                    )
 
-            # draft_row: [1, img_w + 1] (image tokens + EOL)
-            draft_row = torch.cat(draft_tokens_list, dim=-1)
+                    # then continue; later you should redraft suffix, but even this is already less brutal
+                    continue
 
-            # 2b. Rollback KV to snapshot for teacher-force
-            past_key_values = kv_snapshot
-            attention_mask = mask_snapshot
+            # 3) append fixed EOL after image tokens of this row
+            token_sequence, past_key_values, attention_mask = self._append_tokens_with_base(
+                token_sequence=token_sequence,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                tokens=self.image_end_line_token_tensor,   # [1,1]
+                do_cfg=do_cfg,
+            )
 
-            # 2c. Teacher-force draft through base model (causal)
-            teacher_input = draft_row.repeat(2, 1) if do_cfg else draft_row
-            ones = torch.ones(teacher_input.shape[0], 1, teacher_input.shape[1], dtype=torch.long, device=device)
+            if row_had_reject:
+                logger.info(f"[verify] row {row_idx}: rejected at least one chunk, fallback to base tail")
+            else:
+                logger.info(f"[verify] row {row_idx}: all chunks accepted")
+
+        # ------------------------------------------------
+        # Phase 3: ending loop
+        # ------------------------------------------------
+        input_ids = token_sequence[:, -1:]
+        input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
+
+        while True:
+            ones = torch.ones(
+                input_ids.shape[0], 1, input_ids.shape[-1],
+                dtype=attention_mask.dtype,
+                device=attention_mask.device
+            )
             attention_mask = torch.cat([attention_mask, ones], dim=-1)
 
             with self.model.disable_adapter():
-                teacher_out = self.model(
-                    input_ids=teacher_input,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=True, return_dict=True,
-                )
-            past_key_values = teacher_out.past_key_values
-            teacher_logits = teacher_out.logits
-            if do_cfg:
-                cond, uncond = teacher_logits.chunk(2, dim=0)
-                teacher_logits = uncond + cfg_scale * (cond - uncond)
-            teacher_scores = logits_processor(token_sequence, teacher_logits)
-            teacher_choice = torch.argmax(teacher_scores, dim=-1)  # [1, W+1]
-
-            # 2d. Compare and correct (don't touch the EOL at the end)
-            corrected = draft_row.clone()
-            n_corrected = 0
-            row_img_len = self.img_w  # only compare image tokens, not EOL
-            for c in range(row_img_len):
-                if teacher_choice[0, c] != draft_row[0, c]:
-                    corrected[0, c] = teacher_choice[0, c]
-                    n_corrected += 1
-
-            verify_total += row_img_len
-            verify_accepted += (row_img_len - n_corrected)
-            if n_corrected > 0:
-                verify_corrected_rows += 1
-
-            # 2e. If any correction, rebuild KV cache with corrected tokens
-            if n_corrected > 0:
-                rollback_kv_cache(past_key_values, draft_row.shape[-1])
-                attention_mask = attention_mask[..., :-draft_row.shape[-1]]
-
-                corrected_input = corrected.repeat(2, 1) if do_cfg else corrected
-                ones = torch.ones(corrected_input.shape[0], 1, corrected_input.shape[1], dtype=torch.long, device=device)
-                attention_mask = torch.cat([attention_mask, ones], dim=-1)
-
-                with self.model.disable_adapter():
-                    rebuild_out = self.model(
-                        input_ids=corrected_input,
-                        attention_mask=attention_mask,
-                        past_key_values=past_key_values,
-                        use_cache=True, return_dict=True,
-                    )
-                past_key_values = rebuild_out.past_key_values
-
-            token_sequence = torch.cat([token_sequence, corrected], dim=-1)
-
-        # ── Phase 3: Ending loop ──
-        input_ids = token_sequence[:, -1:]
-        input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
-        ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
-        attention_mask = torch.cat([attention_mask, ones], dim=-1)
-
-        with self.model.disable_adapter():
-            while True:
                 next_token, outputs = self._forward_and_sample(
                     input_ids, attention_mask, past_key_values,
                     temperature, logits_processor, token_sequence,
                     do_sample, do_cfg, cfg_scale, is_prefill=False,
                 )
-                past_key_values = outputs.past_key_values
-                token_sequence = torch.cat([token_sequence, next_token], dim=-1)
-                input_ids = next_token.repeat(2, 1) if do_cfg else next_token
-                ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
-                attention_mask = torch.cat([attention_mask, ones], dim=-1)
-                if (next_token.item() == eos_token_id) or (token_sequence.shape[-1] == max_length):
-                    break
 
+            past_key_values = outputs.past_key_values
+            token_sequence = torch.cat([token_sequence, next_token], dim=-1)
+            input_ids = next_token.repeat(2, 1) if do_cfg else next_token
+
+            if (next_token.item() == eos_token_id) or (token_sequence.shape[-1] == max_length):
+                break
+
+        # ------------------------------------------------
+        # stats
+        # ------------------------------------------------
         if verify_total > 0:
             anything_dict["verify_total_tokens"] = verify_total
             anything_dict["verify_accepted_tokens"] = verify_accepted
             anything_dict["verify_acceptance_rate"] = verify_accepted / verify_total
             anything_dict["verify_corrected_rows"] = verify_corrected_rows
+            anything_dict["verify_rejected_chunks"] = verify_rejected_chunks
+            anything_dict["verify_accepted_chunks"] = verify_accept_chunks
+
+            if len(verify_accept_logp) > 0:
+                anything_dict["verify_accept_mean_logprob"] = float(sum(verify_accept_logp) / len(verify_accept_logp))
+            if len(verify_reject_logp) > 0:
+                anything_dict["verify_reject_mean_logprob"] = float(sum(verify_reject_logp) / len(verify_reject_logp))
+
             logger.info(
-                f"Verify: {verify_accepted}/{verify_total} accepted "
+                f"Verify: accepted {verify_accepted}/{verify_total} tokens "
                 f"({verify_accepted/verify_total:.1%}), "
-                f"{verify_corrected_rows}/{remain_rows} rows corrected"
+                f"accepted_chunks={verify_accept_chunks}, "
+                f"rejected_chunks={verify_rejected_chunks}, "
+                f"corrected_rows={verify_corrected_rows}/{remain_rows}"
             )
 
         if return_anything_dict:
