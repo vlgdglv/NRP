@@ -29,6 +29,8 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", type=str, default=None, help="Save directory")
     parser.add_argument("--dataset_name", type=str, default="COCO")
     parser.add_argument("--prompt_path", type=str, default=None)
+    parser.add_argument("--cfg_guidance_scale", type=float, default=3.0)
+    parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--do_decode_image", action="store_true")
     parser.add_argument("--do_save_token", action="store_true")
     parser.add_argument("--json_key", type=str, default="prompt")
@@ -72,8 +74,8 @@ if __name__ == "__main__":
     device = "cuda:0"
     cache_dir = ".cache"
     dtype = "bf16"
-    cfg_guidance_scale = 3.0
-    image_top_k = 2000
+    cfg_guidance_scale = args.cfg_guidance_scale
+    image_top_k = 2000 if not args.argmax else 8192
     template_condition_sentences = f"Generate an image of {target_size_w}x{target_size_h} according to the following prompt:\n"
 
     save_stats_dir = Path(save_dir)
@@ -115,7 +117,7 @@ if __name__ == "__main__":
                     images=[],
                     qas=[[full_prompt_text, None]],
                     max_gen_len=8192,
-                    temperature=1.0,
+                    temperature=args.temperature,
                     cfg_guidance_scale=cfg_guidance_scale,
                     logits_processor=inference_solver.create_logits_processor(cfg=cfg_guidance_scale, image_top_k=image_top_k),
                     seed=seed,
@@ -131,7 +133,7 @@ if __name__ == "__main__":
                     images=[],
                     qas=[[full_prompt_text, None]],
                     max_gen_len=8192,
-                    temperature=1.0,
+                    temperature=args.temperature,
                     do_sample=not args.argmax,
                     cfg_guidance_scale=cfg_guidance_scale,
                     logits_processor=inference_solver.create_logits_processor(cfg=cfg_guidance_scale, image_top_k=image_top_k),

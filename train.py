@@ -94,6 +94,7 @@ def train(args):
     
     run_name = args.run_name or f"lora_{lora_rank}_{lora_alpha}_{epochs}_{batch_size}_{lerarning_rate}_{'cm' if use_standard_causal else 'bm'}"
     output_dir = os.path.join(args.output_dir, run_name)
+    os.makedirs(output_dir, exist_ok=True)
     
     device = "cuda"
     

@@ -208,7 +208,7 @@ if __name__ == "__main__":
             image_name_fmt="generated_{}.jpg",
             )
     
-    if True:
+    if False:
         score = fid.compute_fid(
             "/jizhicfs/pkuhetu/bht/NRP/inference_outputs/lumina/COCO_val2017_baseline_argmax",
             dataset_name="coco2017_val",
@@ -222,16 +222,16 @@ if __name__ == "__main__":
             image_name_fmt="generated_{}.jpg",
             )
 
-    if False:
+    if True:
         # ar_rows = 12
-        lora_name = "rk64_lm_ce_e3"
-        model_name = "janus"
-        # model_name = "lumina"
+        lora_name = "rk256_lm_ce_topkm_e3_110k/checkpoint-12000"
+        # model_name = "janus"
+        model_name = "lumina"
         
-        ar_rows_list = [6, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
+        ar_rows_list = [4, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
         for ar in ar_rows_list:
             print("--" * 12, "AR = ", ar, "--" * 12)
-            image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval_argmax"
+            image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval_temp0.7_cfg5.0"
             score = fid.compute_fid(
                 image_dir,
                 dataset_name="coco2017_val",

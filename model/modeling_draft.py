@@ -413,26 +413,38 @@ class RowExpertModel(nn.Module):
                 k = self.topk_mass_topk
                 T = float(getattr(self, "topk_mass_temp", 1.0))
 
-                # teacher_topk_idx = aligned_teacher_logits.topk(k, dim=-1).indices
-                teacher_topk_logits, teacher_topk_idx = torch.topk(aligned_teacher_logits / T, k=k, dim=-1)
+                teacher_topk_idx = aligned_teacher_logits.topk(k, dim=-1).indices
 
-                teacher_topk_prob = F.softmax(teacher_topk_logits / T, dim=-1)
-
-                student_logprob = F.log_softmax(aligned_student_logits / T, dim=-1)
+                student_logprob = F.log_softmax(aligned_student_logits, dim=-1)
                 student_topk_logprob = torch.gather(
                     student_logprob, dim=-1, index=teacher_topk_idx,
                 ) #[B, T, K]
+                topk_mass_logprob = torch.logsumexp(student_topk_logprob, dim=-1)
+                topk_mass_loss = -topk_mass_logprob[valid_mask].mean()
+
+                output_dict["topk_mass_loss"] = topk_mass_loss.detach()
+                output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_logprob[valid_mask].exp().mean().detach()
+
+                # teacher_topk_idx = aligned_teacher_logits.topk(k, dim=-1).indices
+                # teacher_topk_logits, teacher_topk_idx = torch.topk(aligned_teacher_logits / T, k=k, dim=-1)
+
+                # teacher_topk_prob = F.softmax(teacher_topk_logits / T, dim=-1)
+
+                # student_logprob = F.log_softmax(aligned_student_logits / T, dim=-1)
+                # student_topk_logprob = torch.gather(
+                #     student_logprob, dim=-1, index=teacher_topk_idx,
+                # ) #[B, T, K]
                 
-                topk_mass_per_pos = -(teacher_topk_prob * student_topk_logprob).sum(dim=-1)
-                topk_mass_loss = topk_mass_per_pos[valid_mask].mean()
+                # topk_mass_per_pos = -(teacher_topk_prob * student_topk_logprob).sum(dim=-1)
+                # topk_mass_loss = topk_mass_per_pos[valid_mask].mean()
 
                 # No weighted:
                 # with torch.no_grad():
                 #     topk_mass_logprob = torch.logsumexp(student_topk_logprob, dim=-1)
                 #     output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_logprob[valid_mask].exp().mean().detach()
 
-                output_dict["topk_mass_loss"] = topk_mass_loss.detach()
-                output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_per_pos[valid_mask].exp().mean().detach()
+                # output_dict["topk_mass_loss"] = topk_mass_loss.detach()
+                # output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_per_pos[valid_mask].exp().mean().detach()
                 loss = loss + self.topk_mass_weight * topk_mass_loss
             
             if self.use_mse:

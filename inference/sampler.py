@@ -171,8 +171,8 @@ class SamplerEngine:
 
         scores = logits_processor(token_sequence, last_logits)
         outputs.scores = scores
-        if do_sample:
-            probs = torch.nn.functional.softmax(scores / temperature, dim=-1)
+        probs = torch.nn.functional.softmax(scores / temperature, dim=-1)
+        if do_sample:   
             probs = probs.view(-1, probs.shape[-1]) if is_multi_token else probs
             outputs.probs = probs
             next_token = torch.multinomial(
@@ -183,7 +183,6 @@ class SamplerEngine:
             next_token = next_token.view(1, -1) if is_multi_token else next_token
         else:
             next_token = torch.argmax(scores, dim=-1, keepdim=True)
-
         return next_token, outputs
 
 
