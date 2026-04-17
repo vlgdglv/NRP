@@ -9,7 +9,7 @@ from transformers.cache_utils import DynamicCache
 # from peft import set_adapter, disable_adapter
 
 from utils.logger import get_logger
-from utils import rollback_kv_cache
+from utils import rollback_kv_cache, snapshot_kv_cache
 
 logger = get_logger(__name__)
 
@@ -882,3 +882,238 @@ def build_row_mask(attn_mask, row_len, mode="full", window=4):
     attn[:, :, :, row_start:] = intra_block
 
     return attn
+
+
+class RowVerifySampler(RowParallelSampler):
+    def sample(
+        self,
+        input_ids: torch.LongTensor,
+        logits_processor: LogitsProcessorList,
+        temperature: float = 1.0,
+        max_length: int = 4096,
+        eos_token_id: int = 8710,
+        do_sample: bool = True,
+        sample_mode: str = "baseline",
+        do_cfg: bool = True,
+        cfg_scale: float = 3.0,
+        seed: int = None,
+        use_cache: bool = True,
+        ar_rows: int = 1,
+        draft_use_bi_mask: bool = True,
+        block_size: int = 48,
+        row_attention_mode: str = None,
+        row_attention_window: int = 4,
+        **kwargs
+    ):
+        if row_attention_mode is None:
+            row_attention_mode = "full" if draft_use_bi_mask else "causal"
+
+        anything_dict = {}
+        return_anything_dict = kwargs.get("return_anything_dict", False)
+
+        is_prefill = True
+        device = input_ids.device
+        prefill_length = input_ids.shape[-1]
+        self._init_image_position_info()
+
+        if seed is not None:
+            set_seed(seed)
+            self.generator = torch.Generator(device).manual_seed(seed)
+
+        input_ids = input_ids.contiguous()
+        token_sequence = input_ids
+
+        past_key_values = DynamicCache() if use_cache else None
+
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
+        if attention_mask.dim() == 2:
+            attention_mask = attention_mask.unsqueeze(1)
+
+        if do_cfg:
+            input_ids = input_ids.repeat(2, 1)
+            attention_mask = attention_mask.repeat(2, 1, 1)
+            attention_mask[1::2, :, :prefill_length - 1] = 0
+
+        # ── Phase 1: AR rows with base model ──
+        with self.model.disable_adapter():
+            while True:
+                next_token, outputs = self._forward_and_sample(
+                    input_ids, attention_mask, past_key_values,
+                    temperature, logits_processor, token_sequence,
+                    do_sample, do_cfg, cfg_scale, is_prefill
+                )
+                past_key_values = outputs.past_key_values
+                token_sequence = torch.cat([token_sequence, next_token], dim=-1)
+                input_ids = next_token.repeat(2, 1) if do_cfg else next_token
+                ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
+                attention_mask = torch.cat([attention_mask, ones], dim=-1)
+                is_prefill = False
+                img_pos_info = self._get_decoding_position(token_sequence)
+                if img_pos_info["is_in_image"]:
+                    if img_pos_info["is_end_of_line"] and img_pos_info["num_of_lines"] >= ar_rows:
+                        break
+
+            # fill kv cache for the last EOL token
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True, return_dict=True,
+            )
+            past_key_values = outputs.past_key_values
+
+        assert self.img_h is not None and self.img_w is not None
+        remain_rows = self.img_h - ar_rows
+        assert self.img_w % block_size == 0
+        num_blocks_per_row = self.img_w // block_size
+
+        verify_total = 0
+        verify_accepted = 0
+        verify_corrected_rows = 0
+
+        # ── Phase 2: Verify-and-correct loop ──
+        for row_idx in range(remain_rows):
+            kv_seq_len = past_key_values.get_seq_length()
+            kv_snapshot = snapshot_kv_cache(past_key_values, kv_seq_len)
+            mask_snapshot = attention_mask.clone()
+
+            # 2a. LoRA proposes full row (block by block, same as parent)
+            draft_input_ids = token_sequence[:, -(block_size + 1):-1]
+            draft_tokens_list = []
+
+            for blk in range(num_blocks_per_row):
+                blk_input = draft_input_ids
+                if blk == num_blocks_per_row - 1:
+                    blk_input = torch.cat([blk_input, self.image_end_line_token_tensor], dim=-1)
+                blk_input = blk_input.repeat(2, 1) if do_cfg else blk_input
+
+                ones = torch.ones(blk_input.shape[0], 1, blk_input.shape[1], dtype=torch.long, device=device)
+                attention_mask = torch.cat([attention_mask, ones], dim=-1)
+
+                if row_attention_mode != "causal":
+                    mask4d = build_row_mask(attention_mask, blk_input.shape[-1],
+                                            mode=row_attention_mode, window=row_attention_window)
+                else:
+                    mask4d = None
+
+                blk_out = self.model(
+                    input_ids=blk_input,
+                    past_key_values=past_key_values,
+                    attention_mask=mask4d if mask4d is not None else attention_mask,
+                    use_cache=True, return_dict=True,
+                )
+                past_key_values = blk_out.past_key_values
+                blk_logits = blk_out.logits
+                if do_cfg:
+                    cond, uncond = blk_logits.chunk(2, dim=0)
+                    blk_logits = uncond + cfg_scale * (cond - uncond)
+                scores = logits_processor(token_sequence, blk_logits)
+
+                if do_sample:
+                    probs = torch.nn.functional.softmax(scores / temperature, dim=-1)
+                    draft_blk = torch.multinomial(
+                        probs.view(-1, probs.shape[-1]), num_samples=1,
+                        generator=self.generator,
+                    ).view(1, -1)
+                else:
+                    draft_blk = torch.argmax(scores, dim=-1, keepdim=True).view(1, -1)
+
+                draft_tokens_list.append(draft_blk)
+                draft_input_ids = draft_blk
+
+            # draft_row: [1, img_w + 1] (image tokens + EOL)
+            draft_row = torch.cat(draft_tokens_list, dim=-1)
+
+            # 2b. Rollback KV to snapshot for teacher-force
+            past_key_values = kv_snapshot
+            attention_mask = mask_snapshot
+
+            # 2c. Teacher-force draft through base model (causal)
+            teacher_input = draft_row.repeat(2, 1) if do_cfg else draft_row
+            ones = torch.ones(teacher_input.shape[0], 1, teacher_input.shape[1], dtype=torch.long, device=device)
+            attention_mask = torch.cat([attention_mask, ones], dim=-1)
+
+            with self.model.disable_adapter():
+                teacher_out = self.model(
+                    input_ids=teacher_input,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=True, return_dict=True,
+                )
+            past_key_values = teacher_out.past_key_values
+            teacher_logits = teacher_out.logits
+            if do_cfg:
+                cond, uncond = teacher_logits.chunk(2, dim=0)
+                teacher_logits = uncond + cfg_scale * (cond - uncond)
+            teacher_scores = logits_processor(token_sequence, teacher_logits)
+            teacher_choice = torch.argmax(teacher_scores, dim=-1)  # [1, W+1]
+
+            # 2d. Compare and correct (don't touch the EOL at the end)
+            corrected = draft_row.clone()
+            n_corrected = 0
+            row_img_len = self.img_w  # only compare image tokens, not EOL
+            for c in range(row_img_len):
+                if teacher_choice[0, c] != draft_row[0, c]:
+                    corrected[0, c] = teacher_choice[0, c]
+                    n_corrected += 1
+
+            verify_total += row_img_len
+            verify_accepted += (row_img_len - n_corrected)
+            if n_corrected > 0:
+                verify_corrected_rows += 1
+
+            # 2e. If any correction, rebuild KV cache with corrected tokens
+            if n_corrected > 0:
+                rollback_kv_cache(past_key_values, draft_row.shape[-1])
+                attention_mask = attention_mask[..., :-draft_row.shape[-1]]
+
+                corrected_input = corrected.repeat(2, 1) if do_cfg else corrected
+                ones = torch.ones(corrected_input.shape[0], 1, corrected_input.shape[1], dtype=torch.long, device=device)
+                attention_mask = torch.cat([attention_mask, ones], dim=-1)
+
+                with self.model.disable_adapter():
+                    rebuild_out = self.model(
+                        input_ids=corrected_input,
+                        attention_mask=attention_mask,
+                        past_key_values=past_key_values,
+                        use_cache=True, return_dict=True,
+                    )
+                past_key_values = rebuild_out.past_key_values
+
+            token_sequence = torch.cat([token_sequence, corrected], dim=-1)
+
+        # ── Phase 3: Ending loop ──
+        input_ids = token_sequence[:, -1:]
+        input_ids = input_ids.repeat(2, 1) if do_cfg else input_ids
+        ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
+        attention_mask = torch.cat([attention_mask, ones], dim=-1)
+
+        with self.model.disable_adapter():
+            while True:
+                next_token, outputs = self._forward_and_sample(
+                    input_ids, attention_mask, past_key_values,
+                    temperature, logits_processor, token_sequence,
+                    do_sample, do_cfg, cfg_scale, is_prefill=False,
+                )
+                past_key_values = outputs.past_key_values
+                token_sequence = torch.cat([token_sequence, next_token], dim=-1)
+                input_ids = next_token.repeat(2, 1) if do_cfg else next_token
+                ones = torch.ones(input_ids.shape[0], 1, input_ids.shape[-1], dtype=attention_mask.dtype, device=attention_mask.device)
+                attention_mask = torch.cat([attention_mask, ones], dim=-1)
+                if (next_token.item() == eos_token_id) or (token_sequence.shape[-1] == max_length):
+                    break
+
+        if verify_total > 0:
+            anything_dict["verify_total_tokens"] = verify_total
+            anything_dict["verify_accepted_tokens"] = verify_accepted
+            anything_dict["verify_acceptance_rate"] = verify_accepted / verify_total
+            anything_dict["verify_corrected_rows"] = verify_corrected_rows
+            logger.info(
+                f"Verify: {verify_accepted}/{verify_total} accepted "
+                f"({verify_accepted/verify_total:.1%}), "
+                f"{verify_corrected_rows}/{remain_rows} rows corrected"
+            )
+
+        if return_anything_dict:
+            return token_sequence, anything_dict
+        return token_sequence

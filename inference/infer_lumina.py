@@ -93,6 +93,8 @@ if __name__ == "__main__":
     parser.add_argument("--row_attention_window", type=int, default=4,
                         help="Window size for windowed row attention modes")
     parser.add_argument("--return_anything_dict", action="store_true")
+    parser.add_argument("--verify", action="store_true",
+                        help="Use verify-and-correct sampler (RowVerifySampler)")
     args = parser.parse_args()
     
     model_path = args.model_path
@@ -109,7 +111,7 @@ if __name__ == "__main__":
 
     row_parallel = args.row_parallel
     lora_path = None
-    if row_parallel and args.lora_path is not None:
+    if (row_parallel or args.verify) and args.lora_path is not None:
         lora_path = args.lora_path
 
     template_condition_sentences = f"Generate an image of {target_size_w}x{target_size_h} according to the following prompt:\n"
@@ -120,9 +122,10 @@ if __name__ == "__main__":
         precision=args.dtype,
         target_size=target_size,
         device = device,
-        row_parallel=row_parallel,
+        row_parallel=row_parallel or args.verify,
         lora_path=lora_path,
-        return_anything_dict=return_anything_dict,
+        return_anything_dict=return_anything_dict or args.verify,
+        verify_mode=args.verify,
     )
 
     collected_images = []

@@ -14,7 +14,7 @@ from peft import PeftModel
 
 from inference.lumina.data.item_processor import FlexARItemProcessor
 from model.lumina_arch.chameleon import ChameleonForConditionalGeneration
-from inference.sampler import SamplerEngine, RowParallelSampler, RowParallelSamplerTester
+from inference.sampler import SamplerEngine, RowParallelSampler, RowParallelSamplerTester, RowVerifySampler
 
 
 def get_token_row(token_idx, row_len):
@@ -301,8 +301,8 @@ class FlexARInferenceSolver:
         self, 
         model_path, vae_tokenizer_path, 
         precision, target_size=512, device="cpu",
-        row_parallel=False, lora_path=None, block_size=None, 
-        return_anything_dict=False,
+        row_parallel=False, lora_path=None, block_size=None,
+        return_anything_dict=False, verify_mode=False,
     ):
         self.dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         self.device = device
@@ -331,6 +331,8 @@ class FlexARInferenceSolver:
 
             if return_anything_dict:
                 cls_name = RowParallelSamplerTester
+            elif verify_mode:
+                cls_name = RowVerifySampler
             else:
                 cls_name = RowParallelSampler
             # self.sampler = RowParallelSamplerTester(
