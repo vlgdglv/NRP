@@ -316,6 +316,7 @@ class FlexARInferenceSolver:
         self.item_processor = FlexARItemProcessor(tokenizer=model_path, target_size=target_size, vae_tokenizer_path=vae_tokenizer_path)
         self.inbatch_cfg = True
         
+        self.model.vqmodel = self.item_processor.chameleon_ori_image_tokenizer._vq_model
         
         if row_parallel:
             lora_model = PeftModel.from_pretrained(

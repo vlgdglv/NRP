@@ -25,6 +25,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--begin", type=int, default=0, help="Start index for sampling")
     parser.add_argument("--end", type=int, default=1000, help="End index for sampling (None means to the end)")
+    parser.add_argument("--name_offset", type=int, default=0)
     parser.add_argument("--split", type=str, default="train", help="train or val")
     parser.add_argument("--json_key", type=str, default="prompt")
     # parser.add_argument("--prompt_path", type=str, default="/jizhicfs/pkuhetu/bht/GSD/eval_coco/coco_data/coco2017_train_prompts.json") # datasets/midjourney_20k.json
@@ -46,7 +47,6 @@ if __name__ == "__main__":
     parser.add_argument("--do_save_token", action="store_true")
 
     args = parser.parse_args()
-    
     
     dataset_home_dir = "/jizhicfs/pkuhetu/bht/NRP/datasets/image_token_train_Janus"
     if args.prompt_path is None:
@@ -73,7 +73,8 @@ if __name__ == "__main__":
     target_size = 384
     image_token_num_per_image = 576
     patch_size = 16
-
+    name_offset = args.name_offset
+    
     vl_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_path)
     tokenizer = vl_chat_processor.tokenizer
 
@@ -101,6 +102,9 @@ if __name__ == "__main__":
     with open(prompt_path, "r") as f:
         all_prompts = json.load(f)
     all_prompts = all_prompts[args.begin : args.end]
+    
+    logger.info(f"Source file: {prompt_path}, on this run will generate {len(all_prompts)} samples.")
+    logger.info(f"Save to: {save_stats_dir}")
     
     for offset, item in tqdm(enumerate(all_prompts), total=len(all_prompts), desc="Collecting Stats"):
         idx = offset + args.begin
@@ -155,7 +159,7 @@ if __name__ == "__main__":
             data_load = {
                 "tokens": tokens_sequence[0]
             }
-            torch.save(data_load, save_stats_dir / f"token_sample_{idx}.pt")
+            torch.save(data_load, save_stats_dir / f"token_sample_{idx+name_offset}.pt")
         total_valid_samples += 1
 
     print(f"\nProcessing complete. Valid samples: {total_valid_samples}/{len(all_prompts)}")

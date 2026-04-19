@@ -25,6 +25,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--begin", type=int, default=0, help="Start index for sampling")
     parser.add_argument("--end", type=int, default=1000, help="End index for sampling (None means to the end)")
+    parser.add_argument("--name_offset", type=int, default=0)
     parser.add_argument("--split", type=str, default="train", help="train or val")
     parser.add_argument("--save_dir", type=str, default=None, help="Save directory")
     parser.add_argument("--dataset_name", type=str, default="COCO")
@@ -77,10 +78,9 @@ if __name__ == "__main__":
     cfg_guidance_scale = args.cfg_guidance_scale
     image_top_k = 2000 if not args.argmax else 8192
     template_condition_sentences = f"Generate an image of {target_size_w}x{target_size_h} according to the following prompt:\n"
-
+    name_offset = args.name_offset
     save_stats_dir = Path(save_dir)
     save_stats_dir.mkdir(parents=True, exist_ok=True)
-    print(save_stats_dir)
 
     inference_solver = FlexARInferenceSolver(
         model_path=model_path,
@@ -102,6 +102,9 @@ if __name__ == "__main__":
         all_prompts = json.load(f)
     all_prompts = all_prompts[args.begin : args.end]
     
+    logger.info(f"Source file: {prompt_path}, on this run will generate {len(all_prompts)} samples.")
+    logger.info(f"Save to: {save_stats_dir}")
+
     for offset, item in tqdm(enumerate[Any](all_prompts), total=len(all_prompts), desc="Collecting Stats"):
         idx = offset + args.begin
         prompt = item[args.json_key]
@@ -165,7 +168,7 @@ if __name__ == "__main__":
                 # "logits": logits,
                 "tokens": tokens_sequence[0] # shape [seq_len]
             }
-            torch.save(data_load, save_stats_dir / f"token_sample_{idx}.pt")
+            torch.save(data_load, save_stats_dir / f"token_sample_{idx+name_offset}.pt")
 
         total_valid_samples += 1
 

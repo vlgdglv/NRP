@@ -3,7 +3,7 @@ import time
 import torch
 import random
 import numpy as np
-
+from tqdm import tqdm
 from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 from transformers.cache_utils import DynamicCache
 # from peft import set_adapter, disable_adapter
@@ -893,6 +893,24 @@ class RowVerifySampler(RowParallelSampler):
       3) If a chunk is rejected, DO NOT repaint / keep stale future chunks
          -> fallback to base model for the rest of this row
     """
+    def __init__(
+        self,
+        model,
+        tokenizer=None,
+        *,
+        image_start_token,
+        image_end_token,
+        image_end_line_token,
+        **kwargs
+    ):
+        super().__init__(
+            model=model,
+            tokenizer=tokenizer,
+            image_start_token=image_start_token,
+            image_end_token=image_end_token,
+            image_end_line_token=image_end_line_token,
+        )
+        self._build_token_neighbors()
 
     # -----------------------------
     # helpers
@@ -1183,7 +1201,7 @@ class RowVerifySampler(RowParallelSampler):
 
         for i in range(chunk_tokens.shape[1]):
             cand = chunk_tokens[0, i].item()
-            topm = teacher_topm_idx[0, i]   # [M]
+            topm = teacher_topm_idx[0, i] -4  # [M]
 
             ok = False
             for t in topm.tolist():
@@ -1209,12 +1227,21 @@ class RowVerifySampler(RowParallelSampler):
         return accepted, stats
 
     def _build_token_neighbors(self, topk=32):
-        W = self.base_model.gen_embed.weight.detach()   # [V, D]
+        model = self.model
+        if hasattr(model, "base_model"):
+            model = model.base_model
+        if hasattr(model, "model") and hasattr(model.model, "vqmodel"):
+            # Lumina: VQ-VAE codebook
+            W = model.model.vqmodel.quantize.embedding.weight.detach()
+        elif hasattr(model, "gen_embed"):
+            # Janus
+            W = model.gen_embed.weight.detach()
+        else:
+            raise RuntimeError("Cannot locate VQ codebook or gen_embed on model")
         W = F.normalize(W, dim=-1)
         sim = W @ W.T
-        neigh = sim.topk(k=topk, dim=-1).indices   # [V, topk]
-        self.token_neighbors = neigh
-        
+        self.token_neighbors = sim.topk(k=topk, dim=-1).indices
+
     # -----------------------------
     # main sample
     # -----------------------------
@@ -1381,10 +1408,9 @@ class RowVerifySampler(RowParallelSampler):
                     logits_processor=logits_processor,
                     do_cfg=do_cfg,
                     cfg_scale=cfg_scale,
-                    verify_rank_k=verify_rank_k,
-                    verify_mean_logprob_thresh=verify_mean_logprob_thresh,
-                    verify_min_logprob_thresh=verify_min_logprob_thresh,
-                    verify_topk_frac_thresh=verify_topk_frac_thresh,
+                    teacher_topm=16,
+                    neighbor_topk=32,
+                    chunk_accept_frac=0.6,
                 )
 
                 verify_total += chunk.shape[-1]
@@ -1392,7 +1418,7 @@ class RowVerifySampler(RowParallelSampler):
                 if accepted:
                     verify_accepted += chunk.shape[-1]
                     verify_accept_chunks += 1
-                    verify_accept_logp.append(stats["mean_logprob"])
+                    # verify_accept_logp.append(stats["mean_logprob"])
 
                     # commit accepted chunk with BASE model cache
                     token_sequence, past_key_values, attention_mask = self._append_tokens_with_base(
@@ -1404,9 +1430,8 @@ class RowVerifySampler(RowParallelSampler):
                     )
                 else:
                     row_had_reject = True
-                    verify_corrected_rows += 1
                     verify_rejected_chunks += 1
-                    verify_reject_logp.append(stats["mean_logprob"])
+                    # verify_reject_logp.append(stats["mean_logprob"])
 
                     # SAFE-FIRST POLICY:
                     # Once current frontier chunk is rejected,
@@ -1425,10 +1450,11 @@ class RowVerifySampler(RowParallelSampler):
                         do_cfg=do_cfg,
                         cfg_scale=cfg_scale,
                     )
-
+                
                     # then continue; later you should redraft suffix, but even this is already less brutal
                     continue
-
+                if row_had_reject:
+                    verify_corrected_rows += 1
             # 3) append fixed EOL after image tokens of this row
             token_sequence, past_key_values, attention_mask = self._append_tokens_with_base(
                 token_sequence=token_sequence,
@@ -1482,10 +1508,10 @@ class RowVerifySampler(RowParallelSampler):
             anything_dict["verify_rejected_chunks"] = verify_rejected_chunks
             anything_dict["verify_accepted_chunks"] = verify_accept_chunks
 
-            if len(verify_accept_logp) > 0:
-                anything_dict["verify_accept_mean_logprob"] = float(sum(verify_accept_logp) / len(verify_accept_logp))
-            if len(verify_reject_logp) > 0:
-                anything_dict["verify_reject_mean_logprob"] = float(sum(verify_reject_logp) / len(verify_reject_logp))
+            # if len(verify_accept_logp) > 0:
+            #     anything_dict["verify_accept_mean_logprob"] = float(sum(verify_accept_logp) / len(verify_accept_logp))
+            # if len(verify_reject_logp) > 0:
+            #     anything_dict["verify_reject_mean_logprob"] = float(sum(verify_reject_logp) / len(verify_reject_logp))
 
             logger.info(
                 f"Verify: accepted {verify_accepted}/{verify_total} tokens "

@@ -284,7 +284,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_teacher", action="store_true")
     parser.add_argument("--use_gumbel", action="store_true")
     parser.add_argument("--topk_mass_weight", type=float, default=1.0)
-    parser.add_argument("--topk_mass_topk", type=int, default=64)
+    parser.add_argument("--topk_mass_topk", type=int, default=128)
     parser.add_argument("--row_rel_weight", type=float, default=1.0)
     # Two-stage repairable draft training
     parser.add_argument("--refine_mode", type=str, default="none",

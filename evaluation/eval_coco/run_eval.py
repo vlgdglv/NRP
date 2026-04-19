@@ -222,16 +222,16 @@ if __name__ == "__main__":
             image_name_fmt="generated_{}.jpg",
             )
 
-    if True:
+    if False:
         # ar_rows = 12
-        lora_name = "rk256_lm_ce_topkm_e3_110k/checkpoint-12000"
+        lora_name = "rk256_lm_ce_topkm_e3_110k"
         # model_name = "janus"
         model_name = "lumina"
         
-        ar_rows_list = [4, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
+        ar_rows_list = [12, 24, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
         for ar in ar_rows_list:
             print("--" * 12, "AR = ", ar, "--" * 12)
-            image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval_temp0.7_cfg5.0"
+            image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval"
             score = fid.compute_fid(
                 image_dir,
                 dataset_name="coco2017_val",
@@ -245,26 +245,28 @@ if __name__ == "__main__":
                 image_name_fmt="generated_{}.jpg",
                 )
                 
-    if False:
+    if True:
         # ar_rows = 12
-        lora_name = "rk64_lm_ce_acc_topkm_e5"
-        # model_name = "janus"
-        model_name = "lumina"
-        
-        ar_rows_list = [4, ]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
-        for ar in ar_rows_list:
-            print("--" * 12, "AR = ", ar, "--" * 12)
-            image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval_argmax"
-            score = fid.compute_fid(
-                image_dir,
-                dataset_name="coco2017_val",
-                dataset_split="custom",
-                mode="clean"
-            )
-            print("FID: ", score)
-            calc_generated_clip_score(
-                model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
-                image_dir=image_dir,
-                image_name_fmt="generated_{}.jpg",
+        lora_name_list = ["rk64_lm_ce_e3"]
+        for lora_name in lora_name_list:
+            
+            model_name = "janus"
+            # model_name = "lumina"
+            print(f"Testing: model: {model_name}, lora name: {lora_name}")
+            ar_rows_list = [4]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
+            for ar in ar_rows_list:
+                print("--" * 12, "AR = ", ar, "--" * 12)
+                image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval"
+                score = fid.compute_fid(
+                    image_dir,
+                    dataset_name="coco2017_val",
+                    dataset_split="custom",
+                    mode="clean"
                 )
+                print("FID: ", score)
+                calc_generated_clip_score(
+                    model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
+                    image_dir=image_dir,
+                    image_name_fmt="generated_{}.jpg",
+                    )
     # inference_outputs/lumina/baseline_coco2017
