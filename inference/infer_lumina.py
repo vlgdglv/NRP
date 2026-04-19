@@ -122,9 +122,9 @@ if __name__ == "__main__":
         precision=args.dtype,
         target_size=target_size,
         device = device,
-        row_parallel=row_parallel,
+        row_parallel=row_parallel or args.verify,
         lora_path=lora_path,
-        return_anything_dict=return_anything_dict,
+        return_anything_dict=return_anything_dict or args.verify,
         verify_mode=args.verify,
     )
 
