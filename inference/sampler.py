@@ -921,7 +921,7 @@ class RowScoreVerifySampler(RowParallelSampler):
         if hasattr(self, "token_neighbors"):
             return
         model = self.model
-        while hasattr(model, "base_model"):
+        if hasattr(model, "base_model"):
             model = model.base_model
         if hasattr(model, "model") and hasattr(model.model, "vqmodel"):
             W = model.model.vqmodel.quantize.embedding.weight.detach()

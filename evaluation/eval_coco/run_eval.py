@@ -247,7 +247,7 @@ if __name__ == "__main__":
                 
     if True:
         # ar_rows = 12
-        lora_name_list = ["rk64_lm_ce_e3"]
+        lora_name_list = ["rk64_lm_topkc_e3_160k/checkpoint-15000"]
         for lora_name in lora_name_list:
             
             model_name = "janus"

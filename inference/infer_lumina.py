@@ -124,7 +124,7 @@ if __name__ == "__main__":
         device = device,
         row_parallel=row_parallel or args.verify,
         lora_path=lora_path,
-        return_anything_dict=return_anything_dict or args.verify,
+        return_anything_dict=return_anything_dict,
         verify_mode=args.verify,
     )
 
