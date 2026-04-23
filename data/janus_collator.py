@@ -79,6 +79,7 @@ class JanusImageRowCollator:
         target_row_ids = torch.full_like(input_ids, -1, dtype=torch.long)
         target_col_ids = torch.full_like(input_ids, -1, dtype=torch.long)
         row_valid_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        image_mask = torch.zeros_like(input_ids, dtype=torch.bool)
 
         # Pre-compute intra-row visibility mask (independent of sample)
         if not self.use_standard_causal:
@@ -114,6 +115,7 @@ class JanusImageRowCollator:
             img_begin = Li - self.image_len
             img_end = Li
             base = img_begin
+            image_mask[i, img_begin:img_end] = True
             # assert image_starts[i] == base, f"image_starts[i]: {image_starts[i]}, base: {base}"
             # assert valid_len[i] == img_begin + self.image_len, f"valid_len[i]: {valid_len[i]}, img_begin: {img_begin}, self.image_len: {self.image_len}"
 
@@ -176,6 +178,7 @@ class JanusImageRowCollator:
                 "target_row_ids": target_row_ids,
                 "target_col_ids": target_col_ids,
                 "row_valid_mask": row_valid_mask,
+                "image_mask": image_mask,
             }
         
 

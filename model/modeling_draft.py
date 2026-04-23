@@ -3,6 +3,9 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 
+from model.glancing import build_glancing_inputs, build_inputs_embeds, is_janus
+
+
 class RowExpertModel(nn.Module):
     def __init__(self, 
         base_model,
@@ -39,6 +42,9 @@ class RowExpertModel(nn.Module):
         topk_mass_weight: float = 1.0,
         use_row_rel: bool = False,
         row_rel_weight: float = 1.0,
+
+        use_glat: bool = False,
+        glat_ratio: float = 0.3,
 
         use_runtime_vocab_mask: bool = False,
         runtime_vocab_mask_mode: str | None = None,
@@ -102,6 +108,9 @@ class RowExpertModel(nn.Module):
         self.use_runtime_vocab_mask = use_runtime_vocab_mask
         self.runtime_vocab_mask_mode = runtime_vocab_mask_mode
 
+        self.use_glat = use_glat
+        self.glat_ratio = glat_ratio
+
         self.lumina_image_token_min = lumina_image_token_min
         self.lumina_image_token_max = lumina_image_token_max
         self.lumina_eol_token_id = lumina_eol_token_id
@@ -164,23 +173,45 @@ class RowExpertModel(nn.Module):
             raise ValueError(f"Unknown refine_mode: {self.refine_mode}")
 
     def forward(
-        self, 
-        input_ids, 
-        attention_mask, 
-        labels=None, 
-        teacher_token=None, 
+        self,
+        input_ids,
+        attention_mask,
+        labels=None,
+        teacher_token=None,
         teacher_logits=None,
         teacher_hidden_states=None,
         target_row_ids=None,
         target_col_ids=None,
         row_valid_mask=None,
-    ):    
-        outputs = self.base_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            use_cache=False,
-            output_hidden_states=True,
-        )
+        image_mask=None,
+    ):
+        janus = is_janus(self.base_model)
+        ce_labels = labels
+        if self.use_glat and self.training and labels is not None and self.glat_ratio > 0.0:
+            hybrid_embeds, ce_labels = build_glancing_inputs(
+                self.base_model, input_ids, labels, self.glat_ratio, image_mask=image_mask,
+            )
+            outputs = self.base_model(
+                inputs_embeds=hybrid_embeds,
+                attention_mask=attention_mask,
+                use_cache=False,
+                output_hidden_states=True,
+            )
+        elif janus:
+            inputs_embeds = build_inputs_embeds(self.base_model, input_ids, image_mask)
+            outputs = self.base_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=False,
+                output_hidden_states=True,
+            )
+        else:
+            outputs = self.base_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+                output_hidden_states=True,
+            )
 
         logits = outputs.logits
         loss = 0.0
@@ -205,7 +236,7 @@ class RowExpertModel(nn.Module):
                 
             if self.use_ce:
                 shift_logits = logits.view(-1, logits.shape[-1])
-                shift_labels = labels.view(-1).long()
+                shift_labels = ce_labels.view(-1).long()
 
                 loss_fn = CrossEntropyLoss(ignore_index=-100)
                 ce_loss = loss_fn(shift_logits, shift_labels)
@@ -231,7 +262,7 @@ class RowExpertModel(nn.Module):
                     raw_embeds = draft_probs @ self.base_model.gen_embed.weight  # [B, L, 8]
                     all_draft_embeds = self.base_model.gen_aligner(raw_embeds)    # [B, L, 2048]
                     with torch.no_grad():
-                        real_embeds = self.base_model.language_model.get_input_embeddings()(input_ids)  # [B, L, D]
+                        real_embeds = build_inputs_embeds(self.base_model, input_ids, image_mask)
                 else:
                     # Lumina/unified path: LLM input embeddings
                     V_student = draft_probs.shape[-1]
@@ -304,12 +335,23 @@ class RowExpertModel(nn.Module):
                 self.base_model.eval()
                 with self.base_model.disable_adapter():
                     with torch.no_grad():
-                        teacher_outputs = self.base_model(
-                            input_ids=input_ids,
-                            attention_mask=torch.ones_like(input_ids),
-                            use_cache=False,
-                            output_hidden_states=needs_teacher_hidden,
-                        )
+                        if janus:
+                            teacher_inputs_embeds = build_inputs_embeds(
+                                self.base_model, input_ids, image_mask,
+                            )
+                            teacher_outputs = self.base_model(
+                                inputs_embeds=teacher_inputs_embeds,
+                                attention_mask=torch.ones_like(input_ids),
+                                use_cache=False,
+                                output_hidden_states=needs_teacher_hidden,
+                            )
+                        else:
+                            teacher_outputs = self.base_model(
+                                input_ids=input_ids,
+                                attention_mask=torch.ones_like(input_ids),
+                                use_cache=False,
+                                output_hidden_states=needs_teacher_hidden,
+                            )
                         teacher_logits = teacher_outputs.logits
                         if needs_teacher_hidden:
                             teacher_hidden_states = teacher_outputs.hidden_states[-1]

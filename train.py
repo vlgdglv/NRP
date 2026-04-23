@@ -172,6 +172,8 @@ def train(args):
         refine_tau=args.refine_tau,
         refine_topk=args.refine_topk,
         refine_full_sequence=args.refine_full_sequence,
+        use_glat=args.use_glat,
+        glat_ratio=args.glat_ratio,
     )
     
     if model_name == "janus":
@@ -299,6 +301,10 @@ if __name__ == "__main__":
     parser.add_argument("--refine_full_sequence", action="store_true",
                         help="Replace ALL positions with draft (ablation baseline)")
     parser.add_argument("--use_standard_causal", action="store_true")
+    parser.add_argument("--use_glat", action="store_true",
+                        help="Glancing training: reveal random label tokens at input to encourage within-row modeling")
+    parser.add_argument("--glat_ratio", type=float, default=0.3,
+                        help="Fraction of target positions to reveal each step")
     # Row attention mode for research experiments
     parser.add_argument("--row_attention_mode", type=str, default="full",
                         choices=["full", "bidirectional_window", "causal_window", "no_intrarow"],
