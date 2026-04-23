@@ -4,7 +4,7 @@ os.environ["NCCL_P2P_DISABLE"] = "1"
 os.environ["NCCL_IB_DISABLE"] = "1"
 
 import argparse
-from transformers import Trainer, TrainingArguments
+from transformers import Trainer, TrainingArguments, TrainerCallback
 
 from typing import Dict, Optional
 
@@ -16,6 +16,23 @@ from model import lumina_img_token_config, emu3_img_token_config, janus_img_toke
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class GlatAnnealCallback(TrainerCallback):
+    """Linearly anneal model.glat_ratio from `start` to `end` over training.
+
+    Final state (end, usually 0) matches inference (no reveals), closing the
+    train/inference distribution gap GLAT otherwise suffers from.
+    """
+    def __init__(self, model, start: float, end: float):
+        self.model = model
+        self.start = start
+        self.end = end
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        total = max(state.max_steps, 1)
+        progress = min(state.global_step / total, 1.0)
+        self.model.glat_ratio = self.start + (self.end - self.start) * progress
 
 
 class MyTrainer(Trainer):
@@ -246,6 +263,19 @@ def train(args):
         data_collator=collator
     )
 
+    if args.use_glat and args.glat_anneal:
+        # initial glat_ratio at step 0 = glat_ratio_start
+        model.glat_ratio = args.glat_ratio_start
+        trainer.add_callback(GlatAnnealCallback(
+            model=model,
+            start=args.glat_ratio_start,
+            end=args.glat_ratio_end,
+        ))
+        logger.info(
+            f"GLAT anneal enabled: ratio {args.glat_ratio_start} -> {args.glat_ratio_end} "
+            f"linearly over training."
+        )
+
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     model.base_model.save_pretrained(output_dir)
@@ -304,7 +334,14 @@ if __name__ == "__main__":
     parser.add_argument("--use_glat", action="store_true",
                         help="Glancing training: reveal random label tokens at input to encourage within-row modeling")
     parser.add_argument("--glat_ratio", type=float, default=0.3,
-                        help="Fraction of target positions to reveal each step")
+                        help="Fixed reveal ratio (used when --glat_anneal is NOT set)")
+    parser.add_argument("--glat_anneal", action="store_true",
+                        help="Linearly anneal glat_ratio from --glat_ratio_start to --glat_ratio_end over training. "
+                             "Recommended so the final state matches inference (no reveals).")
+    parser.add_argument("--glat_ratio_start", type=float, default=0.5,
+                        help="Initial reveal ratio when --glat_anneal is set")
+    parser.add_argument("--glat_ratio_end", type=float, default=0.0,
+                        help="Final reveal ratio when --glat_anneal is set")
     # Row attention mode for research experiments
     parser.add_argument("--row_attention_mode", type=str, default="full",
                         choices=["full", "bidirectional_window", "causal_window", "no_intrarow"],
