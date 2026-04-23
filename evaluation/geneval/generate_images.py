@@ -167,6 +167,8 @@ def main():
                    help="seed for sample k = seed_base + k")
     p.add_argument("--start_idx", type=int, default=0)
     p.add_argument("--end_idx", type=int, default=-1)
+    p.add_argument("--max_per_tag", type=int, default=-1,
+                   help="Stratified subset: keep at most N prompts per tag (e.g. 10 -> ~60 prompts total)")
     p.add_argument("--overwrite", action="store_true")
     # generation knobs (shared)
     p.add_argument("--cfg_guidance_scale", type=float, default=5.0)
@@ -192,6 +194,20 @@ def main():
         prompts = prompts[args.start_idx:args.end_idx]
     elif args.start_idx > 0:
         prompts = prompts[args.start_idx:]
+
+    if args.max_per_tag > 0:
+        from collections import defaultdict
+        bucket = defaultdict(list)
+        for idx, rec in prompts:
+            bucket[rec.get("tag", "unknown")].append((idx, rec))
+        subset = []
+        for tag in sorted(bucket):
+            subset.extend(bucket[tag][:args.max_per_tag])
+        subset.sort(key=lambda x: x[0])  # keep original idx order so folder numbers match metadata
+        print(f"[geneval] stratified: kept {len(subset)}/{len(prompts)} prompts "
+              f"(<= {args.max_per_tag} per tag across {len(bucket)} tags)")
+        prompts = subset
+
     print(f"[geneval] {len(prompts)} prompts × {args.n_samples} samples = "
           f"{len(prompts)*args.n_samples} images -> {args.save_dir}")
 
