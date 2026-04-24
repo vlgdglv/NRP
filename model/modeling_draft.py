@@ -5,7 +5,10 @@ from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 
 from model.glancing import build_glancing_inputs, build_inputs_embeds, is_janus
-from model.tinyar import TinyARHead, embed_target_row, get_output_head, get_backbone_hidden_dim
+from model.tinyar import (
+    TinyARHead, embed_target_row, get_output_head,
+    get_backbone_hidden_dim, get_image_vocab_size,
+)
 
 
 class RowExpertModel(nn.Module):
@@ -51,8 +54,9 @@ class RowExpertModel(nn.Module):
         # TinyAR within-row head
         use_tinyar: bool = False,
         tinyar_weight: float = 1.0,
-        tinyar_layers: int = 1,
+        tinyar_layers: int = 2,
         tinyar_heads: int = 8,
+        tinyar_d_head: int = 0,
         tinyar_ffn_mult: int = 4,
 
         use_runtime_vocab_mask: bool = False,
@@ -123,14 +127,17 @@ class RowExpertModel(nn.Module):
         self.use_tinyar = use_tinyar
         self.tinyar_weight = tinyar_weight
         if use_tinyar:
-            hidden_dim = get_backbone_hidden_dim(base_model)
+            d_trunk = get_backbone_hidden_dim(base_model)
+            vocab_size = get_image_vocab_size(base_model)
+            d_head = tinyar_d_head if tinyar_d_head > 0 else min(d_trunk, 512)
             self.tinyar = TinyARHead(
-                hidden_dim=hidden_dim,
-                num_layers=tinyar_layers,
-                num_heads=tinyar_heads,
-                ffn_mult=tinyar_ffn_mult,
+                d_trunk=d_trunk,
+                d_head=d_head,
+                n_layer=tinyar_layers,
+                n_head=tinyar_heads,
+                vocab_size=vocab_size,
+                W=image_latent_width,
             )
-            # Match backbone dtype (bf16 training)
             model_dtype = next(base_model.parameters()).dtype
             self.tinyar = self.tinyar.to(dtype=model_dtype)
         else:
@@ -150,20 +157,16 @@ class RowExpertModel(nn.Module):
     def _compute_tinyar_loss(self, student_hidden_states, input_ids, labels):
         """Train the TinyAR head to predict the target row autoregressively.
 
-        Setup: at position p in source row r (hidden h_p), label is the target-row
-        token at the same column. TinyAR runs a causal AR across the W columns of
-        each target row, conditioned on backbone hiddens [h_{r,0}..h_{r,W-1}] and
-        teacher-forced previous target-row tokens.
+        h_{r, c} (backbone hidden at row-r source position) → predicts target-row
+        token (r+1, c). The head consumes teacher-forced previous target-row tokens
+        as IDs (it owns its own token embedding), conditioned on h_r.
         """
         W = self.image_latent_width
         H = self.image_latent_height
-        device = student_hidden_states.device
-        dtype = student_hidden_states.dtype
         B = input_ids.shape[0]
 
-        all_h = []          # backbone hidden at row r positions (one segment per target row)
-        all_prev = []       # previous target-row tokens embedded (BOS at position 0)
-        all_targets = []    # target row tokens
+        all_h = []       # [W, d_trunk] per segment
+        all_tokens = []  # [W] int64 per segment — ground-truth target row
 
         for b in range(B):
             valid_pos = (labels[b] != -100).nonzero(as_tuple=False)
@@ -173,36 +176,19 @@ class RowExpertModel(nn.Module):
             for r in range(H - 1):
                 src_start = img_begin + r * W
                 tgt_start = img_begin + (r + 1) * W
-
-                h_r = student_hidden_states[b, src_start:src_start + W]      # [W, D]
-                target_row = input_ids[b, tgt_start:tgt_start + W]            # [W]
-
-                # prev embeds: [BOS, embed(t[0]), ..., embed(t[W-2])]
-                prev = torch.empty_like(h_r)
-                prev[0] = self.tinyar.bos.squeeze(0).squeeze(0).to(dtype=dtype)
-                if W > 1:
-                    # prev_ids = target_row[:-1]; embed via backbone's input pathway
-                    prev_emb = embed_target_row(self.base_model, target_row[:-1])
-                    prev[1:] = prev_emb.to(dtype=dtype)
-
-                all_h.append(h_r)
-                all_prev.append(prev)
-                all_targets.append(target_row)
+                all_h.append(student_hidden_states[b, src_start:src_start + W])
+                all_tokens.append(input_ids[b, tgt_start:tgt_start + W].long())
 
         if not all_h:
             return None
 
-        h_stack = torch.stack(all_h, dim=0)          # [N, W, D]
-        prev_stack = torch.stack(all_prev, dim=0)    # [N, W, D]
-        tgt_stack = torch.stack(all_targets, dim=0)  # [N, W]
+        h_stack = torch.stack(all_h, dim=0)        # [N, W, D]
+        tok_stack = torch.stack(all_tokens, dim=0) # [N, W]
 
-        tiny_hidden = self.tinyar(h_stack, prev_stack)   # [N, W, D]
-        out_head = get_output_head(self.base_model)
-        tiny_logits = out_head(tiny_hidden)              # [N, W, V]
-
+        logits = self.tinyar(h_stack, tok_stack)   # [N, W, V]
         return F.cross_entropy(
-            tiny_logits.reshape(-1, tiny_logits.size(-1)),
-            tgt_stack.reshape(-1).long(),
+            logits.reshape(-1, logits.size(-1)),
+            tok_stack.reshape(-1),
         )
 
     @classmethod

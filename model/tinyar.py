@@ -1,17 +1,14 @@
-"""Tiny AR head for within-row coupling.
+"""Tiny AR head for within-row coupling (LlamaGen-style).
 
-Motivation: RowExpertModel emits W independent marginals per row from one parallel
-backbone forward — joint factorizes into product, no intra-row dependence. The TinyAR
-head adds a small causal AR over the W positions of the predicted row, conditioned on
-the backbone's row hidden states + previously-generated tokens within the same row.
-This breaks the factorization without adding a backbone forward.
-
-Inference cost: 1 backbone parallel forward + W sequential mini-forwards through a
-1-layer transformer (much smaller than backbone). Net ~10-20% over pure parallel.
-
-The head outputs hidden states of base-model dim D; the caller projects via the base
-output head (Janus: gen_head, Lumina: lm_head) so we share weights and avoid a 33-270M
-new vocab projection.
+Design choices (learned from LlamaGen's proven tinyAR head):
+  - Head owns its *own* token embedding and *own* output projection; does NOT
+    reuse the backbone's gen_head/gen_embed (sharing them creates a tug-of-war
+    between the main CE loss and the tinyAR loss and produces mushy outputs).
+  - Projects the trunk hidden into head-dim space (d_head) via a fresh linear.
+  - Position embedding within the W-wide row (learned).
+  - Simple additive input: cond + tok + pos. No norm on the sum.
+  - Pre-norm transformer blocks, RMSNorm, SDPA with is_causal=True.
+  - At inference use the O(W²) step_logits helper (no KV cache needed for W<64).
 """
 import math
 import torch
@@ -19,150 +16,159 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class TinyARHead(nn.Module):
-    """1-layer (or N-layer) pre-norm transformer block, causal, KV-cache friendly.
-
-    Forward inputs:
-        backbone_hidden:  [N, W, D]  — backbone hidden states at the W predictor positions
-                                       (i.e. row r's hidden states, used to predict row r+1)
-        prev_token_embeds:[N, W, D]  — embedding of the previous *target-row* token at each
-                                       step. Position 0 uses a learned BOS; position c>=1
-                                       uses embed(target_token_{c-1}).
-
-    Returns:
-        hidden:           [N, W, D]  — caller projects to vocab via base output head.
-    """
-
-    def __init__(self, hidden_dim: int, num_layers: int = 1, num_heads: int = 8,
-                 ffn_mult: int = 4, dropout: float = 0.0):
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
 
-        self.bos = nn.Parameter(torch.zeros(1, 1, hidden_dim))
-        nn.init.normal_(self.bos, std=0.02)
-
-        # Combine backbone_hidden + prev_token_embed -> stream input
-        self.token_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.input_norm = nn.LayerNorm(hidden_dim)
-
-        self.layers = nn.ModuleList([
-            _TinyBlock(hidden_dim, num_heads, ffn_mult, dropout)
-            for _ in range(num_layers)
-        ])
-        self.out_norm = nn.LayerNorm(hidden_dim)
-
-    def make_bos_emb(self, batch: int, dtype, device) -> torch.Tensor:
-        """[batch, 1, D] BOS embedding for inference step 0."""
-        return self.bos.expand(batch, 1, self.hidden_dim).to(dtype=dtype, device=device)
-
-    def combine(self, backbone_hidden: torch.Tensor, prev_token_embeds: torch.Tensor) -> torch.Tensor:
-        x = backbone_hidden + self.token_proj(prev_token_embeds)
-        return self.input_norm(x)
-
-    def forward(self, backbone_hidden: torch.Tensor, prev_token_embeds: torch.Tensor) -> torch.Tensor:
-        """Parallel teacher-forced forward (training)."""
-        x = self.combine(backbone_hidden, prev_token_embeds)
-        N, W, D = x.shape
-        # additive causal mask in float (huggingface-style); -inf above diagonal
-        mask = torch.zeros(W, W, device=x.device, dtype=x.dtype)
-        mask.masked_fill_(torch.triu(torch.ones(W, W, dtype=torch.bool, device=x.device), diagonal=1),
-                          float("-inf"))
-        for layer in self.layers:
-            x = layer(x, attn_mask=mask)
-        return self.out_norm(x)
-
-    @torch.no_grad()
-    def step(self, x_step: torch.Tensor, kv_cache: list) -> tuple:
-        """Single inference step. x_step: [N, 1, D]. Returns (out [N,1,D], new kv_cache)."""
-        new_cache = []
-        h = x_step
-        for li, layer in enumerate(self.layers):
-            h, layer_kv = layer.step(h, kv_cache[li] if kv_cache else None)
-            new_cache.append(layer_kv)
-        return self.out_norm(h), new_cache
+    def forward(self, x):
+        var = x.float().pow(2).mean(-1, keepdim=True)
+        x_norm = x * torch.rsqrt(var + self.eps).to(x.dtype)
+        return x_norm * self.weight
 
 
 class _TinyBlock(nn.Module):
-    def __init__(self, dim: int, num_heads: int, ffn_mult: int, dropout: float):
+    def __init__(self, dim: int, n_head: int):
         super().__init__()
-        assert dim % num_heads == 0
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
-
-        self.norm1 = nn.LayerNorm(dim)
+        assert dim % n_head == 0
+        self.n_head = n_head
+        self.head_dim = dim // n_head
+        self.norm1 = RMSNorm(dim)
         self.qkv = nn.Linear(dim, 3 * dim, bias=False)
-        self.proj = nn.Linear(dim, dim, bias=False)
+        self.wo = nn.Linear(dim, dim, bias=False)
+        self.norm2 = RMSNorm(dim)
+        self.ff_w1 = nn.Linear(dim, 4 * dim, bias=False)
+        self.ff_w2 = nn.Linear(4 * dim, dim, bias=False)
 
-        self.norm2 = nn.LayerNorm(dim)
-        ffn_dim = ffn_mult * dim
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, ffn_dim, bias=False),
-            nn.GELU(),
-            nn.Linear(ffn_dim, dim, bias=False),
-        )
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-    def _attn(self, x, attn_mask=None, kv_cache=None):
-        """x: [N, T, D]. If kv_cache provided, T should be 1 and we extend cache."""
-        N, T, D = x.shape
-        qkv = self.qkv(x).reshape(N, T, 3, self.num_heads, self.head_dim)
-        q, k, v = qkv.unbind(dim=2)  # each [N, T, H, hd]
-        # to [N, H, T, hd]
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        if kv_cache is not None:
-            past_k, past_v = kv_cache
-            k = torch.cat([past_k, k], dim=2)
-            v = torch.cat([past_v, v], dim=2)
-        new_kv = (k, v)
-
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [N, H, T, S]
-        if attn_mask is not None:
-            attn = attn + attn_mask  # broadcast over [H]
-        attn = attn.softmax(dim=-1).to(v.dtype)
-        out = torch.matmul(attn, v)  # [N, H, T, hd]
-        out = out.transpose(1, 2).contiguous().reshape(N, T, D)
-        return self.proj(out), new_kv
-
-    def forward(self, x, attn_mask=None):
-        h, _ = self._attn(self.norm1(x), attn_mask=attn_mask)
-        x = x + self.dropout(h)
-        x = x + self.dropout(self.ffn(self.norm2(x)))
+    def forward(self, x):
+        h = self.norm1(x)
+        B, L, _ = h.shape
+        qkv = self.qkv(h).view(B, L, 3, self.n_head, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        out = out.transpose(1, 2).contiguous().view(B, L, -1)
+        x = x + self.wo(out)
+        x = x + self.ff_w2(F.gelu(self.ff_w1(self.norm2(x))))
         return x
 
-    def step(self, x, kv_cache):
-        """Inference step with KV cache; no attn mask needed (single new query)."""
-        h, new_kv = self._attn(self.norm1(x), attn_mask=None, kv_cache=kv_cache)
-        x = x + h
-        x = x + self.ffn(self.norm2(x))
-        return x, new_kv
+
+class TinyARHead(nn.Module):
+    """Within-row AR head, LlamaGen-style.
+
+    __init__:
+        d_trunk:    backbone hidden dim (input to proj_in)
+        d_head:     head internal dim (typical 384–512 for ~16k vocab, or match trunk)
+        n_layer:    number of tiny transformer blocks
+        n_head:     attention heads
+        vocab_size: image vocab (Janus: 16384; Lumina image range subset, see below)
+        W:          row width (number of positions per row)
+
+    Training forward: forward(h_row, tokens) -> logits [B, W, V]
+      h_row:  [B, W, d_trunk] — backbone hidden states at row r's W positions
+                                 (these are the predictors of row r+1's W tokens)
+      tokens: [B, W] long     — GROUND TRUTH row r+1 tokens (teacher-forced).
+                                 column c sees tokens[:, c-1]; column 0 sees BOS.
+
+    Inference: step_logits(h_row, sampled_so_far) -> [B, V]
+      h_row:  [B, W, d_trunk]
+      sampled_so_far: [B, c] long — tokens already sampled in this row (0 <= c < W)
+      returns logits for column c; user samples then appends.
+
+    Lumina note: image tokens live in a subset of the unified vocab [4, 8195].
+    You can either (a) pass vocab_size = full unified vocab and use all token IDs
+    directly, or (b) remap image tokens to a compact [0, 16384) range in the data
+    pipeline and pass vocab_size=16384. Option (a) is simpler; it wastes a bit
+    of embedding/out capacity on non-image rows of the table but costs nothing
+    at inference. This module is vocab-agnostic.
+    """
+
+    def __init__(
+        self,
+        d_trunk: int,
+        d_head: int,
+        n_layer: int,
+        n_head: int,
+        vocab_size: int,
+        W: int,
+        initializer_range: float = 0.02,
+    ):
+        super().__init__()
+        self.W = W
+        self.d_trunk = d_trunk
+        self.d_head = d_head
+        self.vocab_size = vocab_size
+
+        self.proj_in = nn.Linear(d_trunk, d_head, bias=False)
+        self.tok_emb = nn.Embedding(vocab_size, d_head)
+        self.bos = nn.Parameter(torch.zeros(d_head))
+        self.pos_emb = nn.Parameter(torch.zeros(W, d_head))
+        self.layers = nn.ModuleList([_TinyBlock(d_head, n_head) for _ in range(n_layer)])
+        self.norm = RMSNorm(d_head)
+        self.out = nn.Linear(d_head, vocab_size, bias=False)
+
+        std = initializer_range
+        nn.init.normal_(self.tok_emb.weight, mean=0.0, std=std)
+        nn.init.normal_(self.bos, mean=0.0, std=std)
+        nn.init.normal_(self.pos_emb, mean=0.0, std=std)
+        nn.init.normal_(self.proj_in.weight, mean=0.0, std=std)
+        nn.init.normal_(self.out.weight, mean=0.0, std=std)
+        for blk in self.layers:
+            nn.init.normal_(blk.qkv.weight, mean=0.0, std=std)
+            nn.init.normal_(blk.wo.weight, mean=0.0, std=std)
+            nn.init.normal_(blk.ff_w1.weight, mean=0.0, std=std)
+            nn.init.normal_(blk.ff_w2.weight, mean=0.0, std=std)
+
+    def _assemble_inputs(self, cond: torch.Tensor, prev_tokens: torch.Tensor) -> torch.Tensor:
+        """cond: [B, L, d_head]; prev_tokens: [B, L] long, col 0 dummy (overwritten by BOS)."""
+        B, L = prev_tokens.shape
+        tok = self.tok_emb(prev_tokens).clone()
+        tok[:, 0] = self.bos
+        return cond + tok + self.pos_emb[:L].unsqueeze(0)
+
+    def forward(self, h_row: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+        """Teacher-forced parallel forward (training)."""
+        B, W = tokens.shape
+        prev = torch.zeros_like(tokens)
+        prev[:, 1:] = tokens[:, :-1]
+        cond = self.proj_in(h_row.to(self.proj_in.weight.dtype))
+        x = self._assemble_inputs(cond, prev)
+        for layer in self.layers:
+            x = layer(x)
+        return self.out(self.norm(x))  # [B, W, V]
+
+    @torch.no_grad()
+    def step_logits(self, h_row: torch.Tensor, sampled_so_far: torch.Tensor) -> torch.Tensor:
+        """Logits at next column to sample. O(W²) per row; cheap for W<64."""
+        B = h_row.shape[0]
+        c = sampled_so_far.shape[1]
+        L = c + 1
+        device = h_row.device
+        prev = torch.zeros(B, L, dtype=torch.long, device=device)
+        if c > 0:
+            prev[:, 1:] = sampled_so_far
+        cond = self.proj_in(h_row[:, :L].to(self.proj_in.weight.dtype))
+        x = self._assemble_inputs(cond, prev)
+        for layer in self.layers:
+            x = layer(x)
+        return self.out(self.norm(x[:, -1]))  # [B, V]
 
 
-# ============================================================================
-# Helpers for embedding the previous-row tokens (matches backbone input pathway)
-# ============================================================================
+# ----------------------------------------------------------------------------
+# Helpers (kept for backwards-compat; tinyAR path no longer uses them, but
+# other code in modeling_draft.py imports them).
+# ----------------------------------------------------------------------------
 
 def embed_target_row(base_model, target_row_ids: torch.Tensor) -> torch.Tensor:
-    """Embed target-row token IDs through the SAME pathway the backbone uses.
-
-    Janus image tokens go through gen_aligner(gen_embed(.)).
-    Lumina (Chameleon) uses unified vocab via get_input_embeddings.
-    """
     if hasattr(base_model, "prepare_gen_img_embeds"):
         return base_model.prepare_gen_img_embeds(target_row_ids)
     return base_model.get_input_embeddings()(target_row_ids)
 
 
 def get_output_head(base_model):
-    """Return (callable) that maps [..., D] hidden -> [..., V] logits."""
     if hasattr(base_model, "gen_head"):
         return base_model.gen_head
-    # Lumina / generic causal LM
     head = getattr(base_model, "lm_head", None)
     if head is None:
         head = base_model.get_output_embeddings()
@@ -170,11 +176,14 @@ def get_output_head(base_model):
 
 
 def get_backbone_hidden_dim(base_model) -> int:
-    """Best-effort lookup of the backbone hidden dim."""
-    # Janus
     if hasattr(base_model, "language_model"):
         cfg = base_model.language_model.config
         return getattr(cfg, "hidden_size", None) or cfg.n_embd
-    # Lumina/Chameleon
     cfg = base_model.config
     return getattr(cfg, "hidden_size", None) or cfg.n_embd
+
+
+def get_image_vocab_size(base_model) -> int:
+    """Janus: gen_head.out_features (16384). Lumina/Chameleon: full unified vocab."""
+    head = get_output_head(base_model)
+    return head.weight.shape[0]
