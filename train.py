@@ -338,7 +338,7 @@ if __name__ == "__main__":
     parser.add_argument("--glat_anneal", action="store_true",
                         help="Linearly anneal glat_ratio from --glat_ratio_start to --glat_ratio_end over training. "
                              "Recommended so the final state matches inference (no reveals).")
-    parser.add_argument("--glat_ratio_start", type=float, default=0.5,
+    parser.add_argument("--glat_ratio_start", type=float, default=0.8,
                         help="Initial reveal ratio when --glat_anneal is set")
     parser.add_argument("--glat_ratio_end", type=float, default=0.0,
                         help="Final reveal ratio when --glat_anneal is set")

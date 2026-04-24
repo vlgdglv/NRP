@@ -247,13 +247,13 @@ if __name__ == "__main__":
                 
     if True:
         # ar_rows = 12
-        lora_name_list = ["rk64_lm_topkc_e3_160k/checkpoint-15000"]
+        lora_name_list = ["rk64_lm_ce_glat_e2_200k", "rk64_lm_ce_rel_e2_200k", "rk64_lm_ce_topkm_e2_200k",]
         for lora_name in lora_name_list:
             
             model_name = "janus"
             # model_name = "lumina"
             print(f"Testing: model: {model_name}, lora name: {lora_name}")
-            ar_rows_list = [4]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
+            ar_rows_list = [1, 4]#4, 6]#[1, 3, 4, 6, 8, 12, 18, 24]
             for ar in ar_rows_list:
                 print("--" * 12, "AR = ", ar, "--" * 12)
                 image_dir = f"/jizhicfs/pkuhetu/bht/NRP/inference_outputs/{model_name}/{lora_name}_ar{ar}_cocoval"
@@ -264,9 +264,9 @@ if __name__ == "__main__":
                     mode="clean"
                 )
                 print("FID: ", score)
-                calc_generated_clip_score(
-                    model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
-                    image_dir=image_dir,
-                    image_name_fmt="generated_{}.jpg",
-                    )
+                # calc_generated_clip_score(
+                #     model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
+                #     image_dir=image_dir,
+                #     image_name_fmt="generated_{}.jpg",
+                #     )
     # inference_outputs/lumina/baseline_coco2017
