@@ -5,7 +5,7 @@ from datetime import datetime
 from transformers import AutoModelForCausalLM
 
 from model.janus_arch.models import MultiModalityCausalLM, VLChatProcessor
-from inference.janus.generation import build_prompt, generate, gererate_row_parallel, decode_image, gererate_row_parallel_with_probe
+from inference.janus.generation import build_prompt, generate, gererate_row_parallel, decode_image, gererate_row_parallel_with_probe, gererate_row_parallel_tinyar
 import numpy as np
 import os, time
 from peft import PeftModel
@@ -84,6 +84,11 @@ if __name__ == "__main__":
                         help="Row attention mode for inference (overrides draft_use_causal_mask)")
     parser.add_argument("--row_attention_window", type=int, default=4,
                         help="Window size for windowed row attention modes")
+    parser.add_argument("--tinyar_path", type=str, default=None,
+                        help="Path to tinyar_head.pt (enables TinyAR inference)")
+    parser.add_argument("--tinyar_layers", type=int, default=1)
+    parser.add_argument("--tinyar_heads", type=int, default=8)
+    parser.add_argument("--tinyar_ffn_mult", type=int, default=4)
     args = parser.parse_args()
     
     model_path = args.model_path
@@ -117,6 +122,21 @@ if __name__ == "__main__":
         
     vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
 
+    tinyar_head = None
+    if args.tinyar_path is not None:
+        from model.tinyar import TinyARHead, get_backbone_hidden_dim
+        hidden_dim = get_backbone_hidden_dim(vl_gpt)
+        tinyar_head = TinyARHead(
+            hidden_dim=hidden_dim,
+            num_layers=args.tinyar_layers,
+            num_heads=args.tinyar_heads,
+            ffn_mult=args.tinyar_ffn_mult,
+        )
+        sd = torch.load(args.tinyar_path, map_location="cpu")
+        tinyar_head.load_state_dict(sd)
+        tinyar_head = tinyar_head.to(torch.bfloat16).cuda().eval()
+        logger.info(f"Loaded TinyAR head from {args.tinyar_path}")
+
     gen_kwargs = dict(
         parallel_size=1,
         img_size=target_size,
@@ -134,8 +154,17 @@ if __name__ == "__main__":
 
         t0 = time.perf_counter()
         if args.row_parallel:
-            
-            if not args.with_probe:
+            if tinyar_head is not None:
+                token_sequence = gererate_row_parallel_tinyar(
+                    vl_gpt, vl_chat_processor, prompt,
+                    tinyar_head=tinyar_head,
+                    cfg_weight=args.cfg_guidance_scale,
+                    ar_rows=args.ar_rows,
+                    seed=42,
+                    row_attention_mode=args.row_attention_mode,
+                    row_attention_window=args.row_attention_window,
+                )
+            elif not args.with_probe:
                 token_sequence = gererate_row_parallel(
                     vl_gpt, vl_chat_processor, prompt,
                     cfg_weight=args.cfg_guidance_scale,

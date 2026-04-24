@@ -191,6 +191,11 @@ def train(args):
         refine_full_sequence=args.refine_full_sequence,
         use_glat=args.use_glat,
         glat_ratio=args.glat_ratio,
+        use_tinyar=args.use_tinyar,
+        tinyar_weight=args.tinyar_weight,
+        tinyar_layers=args.tinyar_layers,
+        tinyar_heads=args.tinyar_heads,
+        tinyar_ffn_mult=args.tinyar_ffn_mult,
     )
     
     if model_name == "janus":
@@ -342,6 +347,13 @@ if __name__ == "__main__":
                         help="Initial reveal ratio when --glat_anneal is set")
     parser.add_argument("--glat_ratio_end", type=float, default=0.0,
                         help="Final reveal ratio when --glat_anneal is set")
+    # TinyAR head: small causal AR within each row, conditioned on backbone hiddens
+    parser.add_argument("--use_tinyar", action="store_true",
+                        help="Add tiny within-row AR head to break per-column factorization")
+    parser.add_argument("--tinyar_weight", type=float, default=1.0)
+    parser.add_argument("--tinyar_layers", type=int, default=1)
+    parser.add_argument("--tinyar_heads", type=int, default=8)
+    parser.add_argument("--tinyar_ffn_mult", type=int, default=4)
     # Row attention mode for research experiments
     parser.add_argument("--row_attention_mode", type=str, default="full",
                         choices=["full", "bidirectional_window", "causal_window", "no_intrarow"],

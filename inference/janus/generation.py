@@ -397,3 +397,149 @@ def gererate_row_parallel_with_probe(
         #     generated_tokens[r * image_width + c] = int(final_row[c])
 
     return generated_tokens, anything_dict
+
+@torch.inference_mode()
+def gererate_row_parallel_tinyar(
+    mmgpt: MultiModalityCausalLM,
+    vl_chat_processor: VLChatProcessor,
+    prompt: str,
+    tinyar_head,
+    cfg_weight: float = 5.0,
+    temperature: float = 1.0,
+    do_sample: bool = True,
+    image_width: int = 24,
+    image_height: int = 24,
+    ar_rows: int = 1,
+    seed: int = 42,
+    row_attention_mode: str = None,
+    row_attention_window: int = 4,
+):
+    """Row-parallel sampling with TinyAR within-row coupling.
+
+    Per row (after AR warmup):
+      1. Backbone parallel forward over the W positions given previous row as input
+         -> hidden states h_r[0..W-1] at the current row positions.
+      2. TinyAR sequential rollout of W steps, conditioned on h_r and previously
+         generated tokens within this row. Much cheaper than backbone (1-layer head).
+      3. Feed generated tokens back as next row's input via prepare_gen_img_embeds.
+    """
+    from model.tinyar import get_output_head
+
+    if row_attention_mode is None:
+        row_attention_mode = "full"
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+
+    tokenizer = vl_chat_processor.tokenizer
+    input_ids = torch.LongTensor(tokenizer.encode(prompt)).to("cuda")
+    input_ids = torch.stack([input_ids, input_ids]).to("cuda")
+    input_ids[1, 1:-1] = vl_chat_processor.pad_id
+
+    input_embeddings = mmgpt.language_model.get_input_embeddings()(input_ids)
+    total_tokens = image_height * image_width
+    generated_tokens = torch.zeros((total_tokens,), dtype=torch.int32, device="cuda")
+
+    def cfg_merge(logits):
+        cond = logits[0::2, :]
+        uncond = logits[1::2, :]
+        return uncond + cfg_weight * (cond - uncond)
+
+    attention_mask = torch.full_like(input_ids, 1, dtype=torch.int32)
+    past = None
+
+    out_head = get_output_head(mmgpt)
+    prev_row_embs = []
+
+    # Phase 1: AR warmup (same as the standard sampler)
+    for c in range(image_width * ar_rows):
+        if c > 0:
+            ones = torch.ones((input_embeddings.shape[0], 1), dtype=torch.int32, device="cuda")
+            attention_mask = torch.cat([attention_mask, ones], dim=1)
+        out = mmgpt.language_model.model(
+            inputs_embeds=input_embeddings,
+            use_cache=True, attention_mask=attention_mask, past_key_values=past,
+        )
+        past = out.past_key_values
+        logits = cfg_merge(mmgpt.gen_head(out.last_hidden_state[:, -1, :]))
+        probs = torch.softmax(logits / temperature, dim=-1)
+        if do_sample:
+            nxt = torch.multinomial(probs, 1, generator=generator).squeeze(0)
+        else:
+            nxt = probs.argmax(dim=-1, keepdim=True)
+        token_id = int(nxt)
+        generated_tokens[c] = token_id
+        tok_emb = mmgpt.prepare_gen_img_embeds(
+            torch.tensor([token_id, token_id], device="cuda")
+        )
+        input_embeddings = tok_emb.unsqueeze(1)
+        prev_row_embs.append(tok_emb[0].detach())
+
+    prev_row_embs = prev_row_embs[-image_width:]
+
+    # Phase 2: row-parallel + tinyAR
+    W = image_width
+    device = next(mmgpt.language_model.parameters()).device
+    dtype = next(mmgpt.language_model.parameters()).dtype
+
+    for r in range(ar_rows, image_height):
+        # 2a. Backbone parallel forward for this row
+        row_cond = torch.stack(prev_row_embs, dim=0)                    # [W, D]
+        step_emb = torch.stack([row_cond, row_cond], dim=0).contiguous() # [2, W, D]
+        ones = torch.ones(attention_mask.shape[0], W, dtype=torch.long, device=device)
+        attention_mask = torch.cat([attention_mask, ones], dim=-1)
+
+        if row_attention_mode != "causal":
+            final_mask = build_row_mask(
+                attention_mask, W, mode=row_attention_mode, window=row_attention_window,
+            ).to(step_emb.dtype)
+        else:
+            final_mask = attention_mask
+
+        out_row = mmgpt.language_model.model(
+            inputs_embeds=step_emb,
+            past_key_values=past, attention_mask=final_mask, use_cache=True,
+        )
+        past = out_row.past_key_values
+        row_hidden = out_row.last_hidden_state                          # [2, W, D]
+        # Collapse CFG later at tinyAR logit level; keep both pathways in tinyAR too.
+        h_cond = row_hidden[0:1]                                         # [1, W, D]
+        h_uncond = row_hidden[1:2]                                       # [1, W, D]
+
+        # 2b. TinyAR sequential rollout
+        kv_cache_c = []
+        kv_cache_u = []
+        prev_emb = tinyar_head.make_bos_emb(1, dtype=dtype, device=device)  # [1,1,D]
+
+        row_tokens = []
+        new_prev_row_embs = []
+        for c in range(W):
+            h_c_cond = h_cond[:, c:c+1, :]                               # [1,1,D]
+            h_c_uncond = h_uncond[:, c:c+1, :]
+            x_cond = tinyar_head.combine(h_c_cond, prev_emb)
+            x_uncond = tinyar_head.combine(h_c_uncond, prev_emb)
+
+            h_cond_out, kv_cache_c = tinyar_head.step(x_cond, kv_cache_c)
+            h_uncond_out, kv_cache_u = tinyar_head.step(x_uncond, kv_cache_u)
+
+            logit_cond = out_head(h_cond_out[:, -1, :])                  # [1, V]
+            logit_uncond = out_head(h_uncond_out[:, -1, :])
+            logits = logit_uncond + cfg_weight * (logit_cond - logit_uncond)
+
+            probs = torch.softmax(logits / temperature, dim=-1)
+            if do_sample:
+                nxt = torch.multinomial(probs, 1, generator=generator).squeeze(-1)
+            else:
+                nxt = probs.argmax(dim=-1)
+            tid = int(nxt)
+            row_tokens.append(tid)
+            generated_tokens[r * W + c] = tid
+
+            # prev_emb for next column: embed the just-sampled token (same for cond/uncond)
+            tok_emb_full = mmgpt.prepare_gen_img_embeds(
+                torch.tensor([tid], device=device)
+            )  # [1, D]
+            prev_emb = tok_emb_full.unsqueeze(1).to(dtype=dtype)          # [1,1,D]
+            new_prev_row_embs.append(tok_emb_full[0].to(dtype=dtype))
+
+        prev_row_embs = new_prev_row_embs
+
+    return generated_tokens
