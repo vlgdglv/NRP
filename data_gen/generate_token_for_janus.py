@@ -14,7 +14,7 @@ import numpy as np
 from peft import PeftModel
 from utils.logger import get_logger
 from model.janus_arch.models import MultiModalityCausalLM, VLChatProcessor
-from inference.janus.generation import build_prompt, generate, gererate_row_parallel, decode_image
+from inference.janus.generation import build_prompt, generate, gererate_row_parallel, decode_image, gererate_row_parallel_tinyar
 
 
 logger = get_logger(__name__)
@@ -35,6 +35,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--argmax", action="store_true")
+    parser.add_argument("--cfg_guidance_scale", type=float, default=1)
     parser.add_argument("--row_parallel", action="store_true")
     parser.add_argument("--ar_rows", type=int, default=1)
     parser.add_argument("--row_attention_mode", type=str, default=None,
@@ -45,6 +46,11 @@ if __name__ == "__main__":
     parser.add_argument("--include_prefill", action="store_true")
     parser.add_argument("--do_decode_image", action="store_true")
     parser.add_argument("--do_save_token", action="store_true")
+    parser.add_argument("--tinyar_path", type=str, default=None,
+                        help="Path to tinyar_head.pt (enables TinyAR inference)")
+    parser.add_argument("--tinyar_layers", type=int, default=1)
+    parser.add_argument("--tinyar_heads", type=int, default=8)
+    parser.add_argument("--tinyar_ffn_mult", type=int, default=4)
 
     args = parser.parse_args()
     
@@ -69,7 +75,7 @@ if __name__ == "__main__":
     device = "cuda:0"
     cache_dir = ".cache"
     dtype = "bf16"
-    cfg_guidance_scale = 5.0
+    cfg_guidance_scale = args.cfg_guidance_scale
     target_size = 384
     image_token_num_per_image = 576
     patch_size = 16
@@ -89,6 +95,22 @@ if __name__ == "__main__":
         print("model type:", type(vl_gpt))
         print("has peft_config:", hasattr(vl_gpt, "peft_config"))
         print("peft_config:", getattr(vl_gpt, "peft_config", None))
+    
+    tinyar_head = None
+    if args.tinyar_path is not None:
+        from model.tinyar import TinyARHead, get_backbone_hidden_dim
+        hidden_dim = get_backbone_hidden_dim(vl_gpt)
+        tinyar_head = TinyARHead(
+            hidden_dim=hidden_dim,
+            num_layers=args.tinyar_layers,
+            num_heads=args.tinyar_heads,
+            ffn_mult=args.tinyar_ffn_mult,
+        )
+        sd = torch.load(args.tinyar_path, map_location="cpu")
+        tinyar_head.load_state_dict(sd)
+        tinyar_head = tinyar_head.to(torch.bfloat16).cuda().eval()
+        logger.info(f"Loaded TinyAR head from {args.tinyar_path}")
+
 
     save_stats_dir = Path(save_dir)
     save_stats_dir.mkdir(parents=True, exist_ok=True)
@@ -118,15 +140,26 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             if args.row_parallel:
-                returns = gererate_row_parallel(
-                    vl_gpt, vl_chat_processor, full_prompt, 
-                    cfg_weight=cfg_guidance_scale,
-                    ar_rows=args.ar_rows,
-                    seed=42,
-                    do_sample=not args.argmax,
-                    row_attention_mode=args.row_attention_mode,
-                    row_attention_window=args.row_attention_window,
-                )
+                if tinyar_head is not None:
+                    returns = gererate_row_parallel_tinyar(
+                        vl_gpt, vl_chat_processor, prompt,
+                        tinyar_head=tinyar_head,
+                        cfg_weight=cfg_guidance_scale,
+                        ar_rows=args.ar_rows,
+                        seed=42,
+                        row_attention_mode=args.row_attention_mode,
+                        row_attention_window=args.row_attention_window,
+                    )
+                else:
+                    returns = gererate_row_parallel(
+                        vl_gpt, vl_chat_processor, full_prompt, 
+                        cfg_weight=cfg_guidance_scale,
+                        ar_rows=args.ar_rows,
+                        seed=42,
+                        do_sample=not args.argmax,
+                        row_attention_mode=args.row_attention_mode,
+                        row_attention_window=args.row_attention_window,
+                    )
             else:
                 returns = generate(
                     vl_gpt, vl_chat_processor, full_prompt, 

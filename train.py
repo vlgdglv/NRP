@@ -283,7 +283,7 @@ def train(args):
 
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
-    model.base_model.save_pretrained(output_dir)
+    model.save_pretrained(output_dir)
 
 
 if __name__ == "__main__":
