@@ -504,24 +504,19 @@ def gererate_row_parallel_tinyar(
         h_cond = row_hidden[0:1]                                         # [1, W, D]
         h_uncond = row_hidden[1:2]                                       # [1, W, D]
 
-        # 2b. TinyAR sequential rollout
-        kv_cache_c = []
-        kv_cache_u = []
-        prev_emb = tinyar_head.make_bos_emb(1, dtype=dtype, device=device)  # [1,1,D]
+        # 2b. TinyAR sequential rollout (head is d_trunk-dim; O(W^2) recompute per row)
+        D = h_cond.shape[-1]
+        # Position-0 placeholder: zeros (head overwrites with learned BOS internally).
+        prev_cond = torch.zeros(1, 1, D, device=device, dtype=dtype)
+        prev_uncond = torch.zeros(1, 1, D, device=device, dtype=dtype)
 
-        row_tokens = []
         new_prev_row_embs = []
         for c in range(W):
-            h_c_cond = h_cond[:, c:c+1, :]                               # [1,1,D]
-            h_c_uncond = h_uncond[:, c:c+1, :]
-            x_cond = tinyar_head.combine(h_c_cond, prev_emb)
-            x_uncond = tinyar_head.combine(h_c_uncond, prev_emb)
+            head_h_cond = tinyar_head.step(h_cond, prev_cond)          # [1, 1, D]
+            head_h_uncond = tinyar_head.step(h_uncond, prev_uncond)    # [1, 1, D]
 
-            h_cond_out, kv_cache_c = tinyar_head.step(x_cond, kv_cache_c)
-            h_uncond_out, kv_cache_u = tinyar_head.step(x_uncond, kv_cache_u)
-
-            logit_cond = out_head(h_cond_out[:, -1, :])                  # [1, V]
-            logit_uncond = out_head(h_uncond_out[:, -1, :])
+            logit_cond = out_head(head_h_cond[:, -1, :])               # [1, V]
+            logit_uncond = out_head(head_h_uncond[:, -1, :])
             logits = logit_uncond + cfg_weight * (logit_cond - logit_uncond)
 
             probs = torch.softmax(logits / temperature, dim=-1)
@@ -530,15 +525,15 @@ def gererate_row_parallel_tinyar(
             else:
                 nxt = probs.argmax(dim=-1)
             tid = int(nxt)
-            row_tokens.append(tid)
             generated_tokens[r * W + c] = tid
 
-            # prev_emb for next column: embed the just-sampled token (same for cond/uncond)
             tok_emb_full = mmgpt.prepare_gen_img_embeds(
                 torch.tensor([tid], device=device)
-            )  # [1, D]
-            prev_emb = tok_emb_full.unsqueeze(1).to(dtype=dtype)          # [1,1,D]
-            new_prev_row_embs.append(tok_emb_full[0].to(dtype=dtype))
+            ).to(dtype=dtype)                                          # [1, D]
+            tok_emb_step = tok_emb_full.unsqueeze(0)                   # [1, 1, D]
+            prev_cond = torch.cat([prev_cond, tok_emb_step], dim=1)
+            prev_uncond = torch.cat([prev_uncond, tok_emb_step], dim=1)
+            new_prev_row_embs.append(tok_emb_full[0])
 
         prev_row_embs = new_prev_row_embs
 

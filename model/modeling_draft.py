@@ -6,8 +6,7 @@ import torch.nn.functional as F
 
 from model.glancing import build_glancing_inputs, build_inputs_embeds, is_janus
 from model.tinyar import (
-    TinyARHead, embed_target_row, get_output_head,
-    get_backbone_hidden_dim, get_image_vocab_size,
+    TinyARHead, embed_target_row, get_output_head, get_backbone_hidden_dim,
 )
 
 
@@ -56,8 +55,6 @@ class RowExpertModel(nn.Module):
         tinyar_weight: float = 1.0,
         tinyar_layers: int = 2,
         tinyar_heads: int = 8,
-        tinyar_d_head: int = 0,
-        tinyar_ffn_mult: int = 4,
 
         use_runtime_vocab_mask: bool = False,
         runtime_vocab_mask_mode: str | None = None,
@@ -128,14 +125,10 @@ class RowExpertModel(nn.Module):
         self.tinyar_weight = tinyar_weight
         if use_tinyar:
             d_trunk = get_backbone_hidden_dim(base_model)
-            vocab_size = get_image_vocab_size(base_model)
-            d_head = tinyar_d_head if tinyar_d_head > 0 else min(d_trunk, 512)
             self.tinyar = TinyARHead(
                 d_trunk=d_trunk,
-                d_head=d_head,
                 n_layer=tinyar_layers,
                 n_head=tinyar_heads,
-                vocab_size=vocab_size,
                 W=image_latent_width,
             )
             model_dtype = next(base_model.parameters()).dtype
@@ -157,16 +150,20 @@ class RowExpertModel(nn.Module):
     def _compute_tinyar_loss(self, student_hidden_states, input_ids, labels):
         """Train the TinyAR head to predict the target row autoregressively.
 
-        h_{r, c} (backbone hidden at row-r source position) → predicts target-row
-        token (r+1, c). The head consumes teacher-forced previous target-row tokens
-        as IDs (it owns its own token embedding), conditioned on h_r.
+        h_{r, c} (backbone hidden at row-r source position) predicts target-row
+        token (r+1, c). The head receives teacher-forced embeddings of the previous
+        target-row tokens (BOS at col 0), conditioned on h_r. Output hidden is
+        projected through the model's own head (Janus: gen_head, Lumina: lm_head) —
+        both are LoRA-trainable in the existing setups.
         """
         W = self.image_latent_width
         H = self.image_latent_height
         B = input_ids.shape[0]
+        dtype = student_hidden_states.dtype
 
-        all_h = []       # [W, d_trunk] per segment
-        all_tokens = []  # [W] int64 per segment — ground-truth target row
+        all_h = []      # [W, D]
+        all_prev = []   # [W, D] — prev embeds, pos 0 is dummy (head overwrites with BOS)
+        all_tokens = [] # [W] int64 target row
 
         for b in range(B):
             valid_pos = (labels[b] != -100).nonzero(as_tuple=False)
@@ -176,16 +173,31 @@ class RowExpertModel(nn.Module):
             for r in range(H - 1):
                 src_start = img_begin + r * W
                 tgt_start = img_begin + (r + 1) * W
-                all_h.append(student_hidden_states[b, src_start:src_start + W])
-                all_tokens.append(input_ids[b, tgt_start:tgt_start + W].long())
+
+                h_r = student_hidden_states[b, src_start:src_start + W]       # [W, D]
+                target_row = input_ids[b, tgt_start:tgt_start + W].long()     # [W]
+
+                # prev embeds: position 0 is placeholder (overwritten by BOS),
+                # positions 1..W-1 embed target_row[0..W-2].
+                prev = torch.zeros_like(h_r)
+                if W > 1:
+                    prev_emb = embed_target_row(self.base_model, target_row[:-1])
+                    prev[1:] = prev_emb.to(dtype=dtype)
+
+                all_h.append(h_r)
+                all_prev.append(prev)
+                all_tokens.append(target_row)
 
         if not all_h:
             return None
 
         h_stack = torch.stack(all_h, dim=0)        # [N, W, D]
+        prev_stack = torch.stack(all_prev, dim=0)  # [N, W, D]
         tok_stack = torch.stack(all_tokens, dim=0) # [N, W]
 
-        logits = self.tinyar(h_stack, tok_stack)   # [N, W, V]
+        head_hidden = self.tinyar(h_stack, prev_stack)   # [N, W, D]
+        out_head = get_output_head(self.base_model)
+        logits = out_head(head_hidden)                   # [N, W, V]
         return F.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
             tok_stack.reshape(-1),

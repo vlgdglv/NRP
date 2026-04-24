@@ -195,7 +195,6 @@ def train(args):
         tinyar_weight=args.tinyar_weight,
         tinyar_layers=args.tinyar_layers,
         tinyar_heads=args.tinyar_heads,
-        tinyar_ffn_mult=args.tinyar_ffn_mult,
     )
     
     if model_name == "janus":
@@ -353,7 +352,6 @@ if __name__ == "__main__":
     parser.add_argument("--tinyar_weight", type=float, default=1.0)
     parser.add_argument("--tinyar_layers", type=int, default=1)
     parser.add_argument("--tinyar_heads", type=int, default=8)
-    parser.add_argument("--tinyar_ffn_mult", type=int, default=4)
     # Row attention mode for research experiments
     parser.add_argument("--row_attention_mode", type=str, default="full",
                         choices=["full", "bidirectional_window", "causal_window", "no_intrarow"],

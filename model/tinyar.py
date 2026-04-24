@@ -1,16 +1,16 @@
-"""Tiny AR head for within-row coupling (LlamaGen-style).
+"""Tiny AR head for within-row coupling.
 
-Design choices (learned from LlamaGen's proven tinyAR head):
-  - Head owns its *own* token embedding and *own* output projection; does NOT
-    reuse the backbone's gen_head/gen_embed (sharing them creates a tug-of-war
-    between the main CE loss and the tinyAR loss and produces mushy outputs).
-  - Projects the trunk hidden into head-dim space (d_head) via a fresh linear.
-  - Position embedding within the W-wide row (learned).
-  - Simple additive input: cond + tok + pos. No norm on the sum.
-  - Pre-norm transformer blocks, RMSNorm, SDPA with is_causal=True.
-  - At inference use the O(W²) step_logits helper (no KV cache needed for W<64).
+Architecture: small causal transformer over W positions of one row, conditioned on
+backbone hiddens (additive). Operates at d_trunk so the caller can project outputs
+through the existing trainable head (Janus: gen_head in modules_to_save).
+
+Inputs/outputs work in trunk-dim space (no proj_in, no own vocab projection).
+The caller is responsible for:
+  - embedding previous-row tokens (e.g. via prepare_gen_img_embeds for Janus)
+  - projecting the head's hidden output to vocab logits via the model's gen_head/lm_head
+
+Inference uses an O(W²) step helper — no KV cache (W ≤ 64, cost is negligible).
 """
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -55,118 +55,89 @@ class _TinyBlock(nn.Module):
 
 
 class TinyARHead(nn.Module):
-    """Within-row AR head, LlamaGen-style.
+    """Within-row AR head, operates at d_trunk dim.
 
-    __init__:
-        d_trunk:    backbone hidden dim (input to proj_in)
-        d_head:     head internal dim (typical 384–512 for ~16k vocab, or match trunk)
-        n_layer:    number of tiny transformer blocks
-        n_head:     attention heads
-        vocab_size: image vocab (Janus: 16384; Lumina image range subset, see below)
-        W:          row width (number of positions per row)
+    Training: forward(h_row, prev_embeds) -> hidden [B, W, d_trunk]
+        h_row:       [B, W, d_trunk]   backbone hiddens at the W predictor positions
+        prev_embeds: [B, W, d_trunk]   embeddings of previous target-row tokens;
+                                         position 0 is overwritten by learned BOS.
+        Caller projects returned hidden -> vocab via gen_head/lm_head.
 
-    Training forward: forward(h_row, tokens) -> logits [B, W, V]
-      h_row:  [B, W, d_trunk] — backbone hidden states at row r's W positions
-                                 (these are the predictors of row r+1's W tokens)
-      tokens: [B, W] long     — GROUND TRUTH row r+1 tokens (teacher-forced).
-                                 column c sees tokens[:, c-1]; column 0 sees BOS.
-
-    Inference: step_logits(h_row, sampled_so_far) -> [B, V]
-      h_row:  [B, W, d_trunk]
-      sampled_so_far: [B, c] long — tokens already sampled in this row (0 <= c < W)
-      returns logits for column c; user samples then appends.
-
-    Lumina note: image tokens live in a subset of the unified vocab [4, 8195].
-    You can either (a) pass vocab_size = full unified vocab and use all token IDs
-    directly, or (b) remap image tokens to a compact [0, 16384) range in the data
-    pipeline and pass vocab_size=16384. Option (a) is simpler; it wastes a bit
-    of embedding/out capacity on non-image rows of the table but costs nothing
-    at inference. This module is vocab-agnostic.
+    Inference: step(h_row, prev_embeds_so_far) -> hidden [B, 1, d_trunk]
+        h_row:                [B, W, d_trunk]
+        prev_embeds_so_far:   [B, c+1, d_trunk]   (BOS at pos 0, then embeddings of
+                                                    sampled tokens 0..c-1)
+        Returns hidden at column c; caller projects -> logits, samples, then for the
+        next step extends prev_embeds_so_far with the new token's embedding.
     """
 
     def __init__(
         self,
         d_trunk: int,
-        d_head: int,
         n_layer: int,
         n_head: int,
-        vocab_size: int,
         W: int,
         initializer_range: float = 0.02,
     ):
         super().__init__()
         self.W = W
         self.d_trunk = d_trunk
-        self.d_head = d_head
-        self.vocab_size = vocab_size
 
-        self.proj_in = nn.Linear(d_trunk, d_head, bias=False)
-        self.tok_emb = nn.Embedding(vocab_size, d_head)
-        self.bos = nn.Parameter(torch.zeros(d_head))
-        self.pos_emb = nn.Parameter(torch.zeros(W, d_head))
-        self.layers = nn.ModuleList([_TinyBlock(d_head, n_head) for _ in range(n_layer)])
-        self.norm = RMSNorm(d_head)
-        self.out = nn.Linear(d_head, vocab_size, bias=False)
+        self.bos = nn.Parameter(torch.zeros(d_trunk))
+        self.pos_emb = nn.Parameter(torch.zeros(W, d_trunk))
+        self.layers = nn.ModuleList([_TinyBlock(d_trunk, n_head) for _ in range(n_layer)])
+        self.norm = RMSNorm(d_trunk)
 
         std = initializer_range
-        nn.init.normal_(self.tok_emb.weight, mean=0.0, std=std)
         nn.init.normal_(self.bos, mean=0.0, std=std)
         nn.init.normal_(self.pos_emb, mean=0.0, std=std)
-        nn.init.normal_(self.proj_in.weight, mean=0.0, std=std)
-        nn.init.normal_(self.out.weight, mean=0.0, std=std)
         for blk in self.layers:
             nn.init.normal_(blk.qkv.weight, mean=0.0, std=std)
             nn.init.normal_(blk.wo.weight, mean=0.0, std=std)
             nn.init.normal_(blk.ff_w1.weight, mean=0.0, std=std)
             nn.init.normal_(blk.ff_w2.weight, mean=0.0, std=std)
 
-    def _assemble_inputs(self, cond: torch.Tensor, prev_tokens: torch.Tensor) -> torch.Tensor:
-        """cond: [B, L, d_head]; prev_tokens: [B, L] long, col 0 dummy (overwritten by BOS)."""
-        B, L = prev_tokens.shape
-        tok = self.tok_emb(prev_tokens).clone()
-        tok[:, 0] = self.bos
-        return cond + tok + self.pos_emb[:L].unsqueeze(0)
+    def _assemble(self, h_row: torch.Tensor, prev_embeds: torch.Tensor) -> torch.Tensor:
+        """h_row: [B, L, D]; prev_embeds: [B, L, D] (col 0 dummy, overwritten by BOS)."""
+        L = prev_embeds.shape[1]
+        prev = prev_embeds.clone()
+        prev[:, 0] = self.bos.to(dtype=prev.dtype)
+        return h_row + prev + self.pos_emb[:L].unsqueeze(0).to(dtype=h_row.dtype)
 
-    def forward(self, h_row: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, h_row: torch.Tensor, prev_embeds: torch.Tensor) -> torch.Tensor:
         """Teacher-forced parallel forward (training)."""
-        B, W = tokens.shape
-        prev = torch.zeros_like(tokens)
-        prev[:, 1:] = tokens[:, :-1]
-        cond = self.proj_in(h_row.to(self.proj_in.weight.dtype))
-        x = self._assemble_inputs(cond, prev)
+        x = self._assemble(h_row, prev_embeds)
         for layer in self.layers:
             x = layer(x)
-        return self.out(self.norm(x))  # [B, W, V]
+        return self.norm(x)  # [B, W, D]
 
     @torch.no_grad()
-    def step_logits(self, h_row: torch.Tensor, sampled_so_far: torch.Tensor) -> torch.Tensor:
-        """Logits at next column to sample. O(W²) per row; cheap for W<64."""
-        B = h_row.shape[0]
-        c = sampled_so_far.shape[1]
-        L = c + 1
-        device = h_row.device
-        prev = torch.zeros(B, L, dtype=torch.long, device=device)
-        if c > 0:
-            prev[:, 1:] = sampled_so_far
-        cond = self.proj_in(h_row[:, :L].to(self.proj_in.weight.dtype))
-        x = self._assemble_inputs(cond, prev)
+    def step(self, h_row: torch.Tensor, prev_embeds_so_far: torch.Tensor) -> torch.Tensor:
+        """Inference step: returns hidden at the next column to sample, [B, 1, D].
+
+        Re-runs the first L positions each call (O(W²) total per row). For W≤64 the
+        cost is dwarfed by the backbone forward; not worth a KV cache.
+        """
+        L = prev_embeds_so_far.shape[1]
+        x = self._assemble(h_row[:, :L], prev_embeds_so_far)
         for layer in self.layers:
             x = layer(x)
-        return self.out(self.norm(x[:, -1]))  # [B, V]
+        return self.norm(x[:, -1:])  # [B, 1, D]
 
 
 # ----------------------------------------------------------------------------
-# Helpers (kept for backwards-compat; tinyAR path no longer uses them, but
-# other code in modeling_draft.py imports them).
+# Helpers
 # ----------------------------------------------------------------------------
 
 def embed_target_row(base_model, target_row_ids: torch.Tensor) -> torch.Tensor:
+    """Embed target-row token IDs through the SAME pathway the backbone uses at inference."""
     if hasattr(base_model, "prepare_gen_img_embeds"):
         return base_model.prepare_gen_img_embeds(target_row_ids)
     return base_model.get_input_embeddings()(target_row_ids)
 
 
 def get_output_head(base_model):
+    """Return (callable) that maps [..., D] hidden -> [..., V] logits."""
     if hasattr(base_model, "gen_head"):
         return base_model.gen_head
     head = getattr(base_model, "lm_head", None)
@@ -181,9 +152,3 @@ def get_backbone_hidden_dim(base_model) -> int:
         return getattr(cfg, "hidden_size", None) or cfg.n_embd
     cfg = base_model.config
     return getattr(cfg, "hidden_size", None) or cfg.n_embd
-
-
-def get_image_vocab_size(base_model) -> int:
-    """Janus: gen_head.out_features (16384). Lumina/Chameleon: full unified vocab."""
-    head = get_output_head(base_model)
-    return head.weight.shape[0]
