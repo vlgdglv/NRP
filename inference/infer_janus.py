@@ -86,9 +86,10 @@ if __name__ == "__main__":
                         help="Window size for windowed row attention modes")
     parser.add_argument("--tinyar_path", type=str, default=None,
                         help="Path to tinyar_head.pt (enables TinyAR inference)")
-    parser.add_argument("--tinyar_layers", type=int, default=1)
+    parser.add_argument("--tinyar_layers", type=int, default=2)
     parser.add_argument("--tinyar_heads", type=int, default=8)
-    parser.add_argument("--tinyar_ffn_mult", type=int, default=4)
+    parser.add_argument("--tinyar_W", type=int, default=24,
+                        help="Row width the TinyAR head was trained with (Janus = 24)")
     args = parser.parse_args()
     
     model_path = args.model_path
@@ -125,12 +126,12 @@ if __name__ == "__main__":
     tinyar_head = None
     if args.tinyar_path is not None:
         from model.tinyar import TinyARHead, get_backbone_hidden_dim
-        hidden_dim = get_backbone_hidden_dim(vl_gpt)
+        d_trunk = get_backbone_hidden_dim(vl_gpt)
         tinyar_head = TinyARHead(
-            hidden_dim=hidden_dim,
-            num_layers=args.tinyar_layers,
-            num_heads=args.tinyar_heads,
-            ffn_mult=args.tinyar_ffn_mult,
+            d_trunk=d_trunk,
+            n_layer=args.tinyar_layers,
+            n_head=args.tinyar_heads,
+            W=args.tinyar_W,
         )
         sd = torch.load(args.tinyar_path, map_location="cpu")
         tinyar_head.load_state_dict(sd)
