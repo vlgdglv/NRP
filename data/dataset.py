@@ -151,6 +151,13 @@ class TokenDataset(Dataset):
     <eoi>: 8196
 """    
 
+def safe_check_batch(token_check_func, batch, W, H):
+    try:
+        token_check_func(batch, W, H)
+        return True
+    except AssertionError as e:
+        return False
+
 class ImageRowCollator:
     def __init__(
         self,
@@ -205,13 +212,18 @@ class ImageRowCollator:
         self.row_attention_window = row_attention_window
         assert row_attention_mode in ("full", "bidirectional_window", "causal_window", "no_intrarow"), \
             f"Unknown row_attention_mode: {row_attention_mode}"
-        
+    
+    
     def __call__(self, batch):
         # batch: List[Dict[str, torch.Tensor]]
+        bad_batch = False
         if self.token_check_func is not None:
-            self.token_check_func(batch, self.W, self.H)
+            try:
+                self.token_check_func(batch, self.W, self.H)
+            except AssertionError as e:
+                bad_batch = True
         token_ids = [sample["input_ids"] for sample in batch]
-
+        
         if self.use_teacher:
             # check length
             teacher_token = [sample["teacher_token"] for sample in batch]
@@ -348,7 +360,18 @@ class ImageRowCollator:
         attention_mask = torch.full((B, 1, L, L), min_value, dtype=torch.bfloat16)
         attention_mask.masked_fill_(attention_mask_bool, 0.0)
         attention_mask = attention_mask.contiguous()
-    
+
+        if bad_batch:
+            logger.warning("We got a bad sample! Replace it with dummy batch.")
+            labels.fill_(self.invalid_label)
+            row_valid_mask.fill_(False)
+            target_row_ids.fill_(-1)
+            target_col_ids.fill_(-1)
+
+            if self.use_teacher:
+                teacher_token.fill_(self.pad_token_id)
+                teacher_logits.zero_()
+                
         if self.use_teacher:
             return {
                 "input_ids": input_ids,
@@ -420,23 +443,23 @@ if __name__ == "__main__":
     base_rss = rss_mb()
     base_tensor_bytes = 0
 
-    Lumina_COCO17_path = "/home/ffc3/bht/GSD/COCO_Lumina7B_tokens_for_train"
+    Lumina_COCO17_path = "/jizhicfs/pkuhetu/bht/data/image_token_training_Lumina/COCO_Lumina7B_tokens_for_train"
     Lumina_laion_path = "/home/ffc3/bht/NRP/datasets/laion_Lumina7B_tokens_for_train"
     Lumina_midjourney_path = "/home/ffc3/bht/NRP/datasets/midjourney_Lumina7B_tokens_for_train"
 
     data_dir = [
         Lumina_COCO17_path, 
-        Lumina_laion_path, 
-        Lumina_midjourney_path
+        # Lumina_laion_path, 
+        # Lumina_midjourney_path
     ]
     dataset_name = [
         "COCO",
-        "laion", 
-        "midjourney"
+        # "laion", 
+        # "midjourney"
     ]
     
     # Emu3_COCO_path = "/home/ffc3/bht/NRP/datasets/COCO_Emu3_tokens_for_train"
-    B, N, NB = 32, 1, True
+    B, N, NB = 1, -1, False
     W, H = 49, 48
     cnt = 0
     use_teacher = False
@@ -445,19 +468,21 @@ if __name__ == "__main__":
 
     t0 = time.time()
     for i, batch in enumerate(loader):
-        inputs = batch["input_ids"].cuda(non_blocking=NB)
-        mask = batch["attention_mask"].cuda(non_blocking=NB)
-        labels = batch["labels"].cuda(non_blocking=NB)
-        if use_teacher:
-            teacher_token = batch["teacher_token"]
-            teacher_logits = batch["teacher_logits"]
-            print("inputs.shape", inputs.shape, "mask.shape", mask.shape, "labels.shape", labels.shape)
-            print("teacher_token.shape", teacher_token.shape, "teacher_logits.shape", teacher_logits.shape)
-        base_tensor_bytes += tensor_bytes(inputs)
-        base_tensor_bytes += tensor_bytes(mask)
-        base_tensor_bytes += tensor_bytes(labels)
-        Lmax = max(Lmax, inputs.shape[1])    
+        inputs = batch["input_ids"]
+        mask = batch["attention_mask"]
+        labels = batch["labels"]
+        # if use_teacher:
+        #     teacher_token = batch["teacher_token"]
+        #     teacher_logits = batch["teacher_logits"]
+        #     print("inputs.shape", inputs.shape, "mask.shape", mask.shape, "labels.shape", labels.shape)
+        #     print("teacher_token.shape", teacher_token.shape, "teacher_logits.shape", teacher_logits.shape)
+        # base_tensor_bytes += tensor_bytes(inputs)
+        # base_tensor_bytes += tensor_bytes(mask)
+        # base_tensor_bytes += tensor_bytes(labels)
+        # Lmax = max(Lmax, inputs.shape[1])    
         cnt += 1
+        if i % 1000 == 0:
+            logger.info(f"Checked: {i} data")
         if i == N:
             break
 

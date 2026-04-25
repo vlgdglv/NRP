@@ -247,7 +247,7 @@ if __name__ == "__main__":
                 
     if True:
         # ar_rows = 12
-        lora_name_list = ["rk64_lm_ce_glat_e2_200k", "rk64_lm_ce_rel_e2_200k", "rk64_lm_ce_topkm_e2_200k",]
+        lora_name_list = ["rk64_lm_ce_topkm_e2_200k"]
         for lora_name in lora_name_list:
             
             model_name = "janus"
@@ -264,9 +264,9 @@ if __name__ == "__main__":
                     mode="clean"
                 )
                 print("FID: ", score)
-                # calc_generated_clip_score(
-                #     model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
-                #     image_dir=image_dir,
-                #     image_name_fmt="generated_{}.jpg",
-                #     )
+                calc_generated_clip_score(
+                    model_name="local-dir:/jizhicfs/pkuhetu/bht/model_home/vit_large_patch14_clip_224.openai",
+                    image_dir=image_dir,
+                    image_name_fmt="generated_{}.jpg",
+                    )
     # inference_outputs/lumina/baseline_coco2017

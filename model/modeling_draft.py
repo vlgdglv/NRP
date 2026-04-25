@@ -55,6 +55,9 @@ class RowExpertModel(nn.Module):
         tinyar_weight: float = 1.0,
         tinyar_layers: int = 2,
         tinyar_heads: int = 8,
+        
+        use_traj_shift_hidden: bool = False,
+        traj_shift_hidden_weight: int = 1.0,
 
         use_runtime_vocab_mask: bool = False,
         runtime_vocab_mask_mode: str | None = None,
@@ -135,6 +138,9 @@ class RowExpertModel(nn.Module):
             self.tinyar = self.tinyar.to(dtype=model_dtype)
         else:
             self.tinyar = None
+            
+        self.use_traj_shift_hidden = use_traj_shift_hidden
+        self.traj_shift_hidden_weight = traj_shift_hidden_weight
 
         self.lumina_image_token_min = lumina_image_token_min
         self.lumina_image_token_max = lumina_image_token_max
@@ -255,6 +261,83 @@ class RowExpertModel(nn.Module):
             return F.gumbel_softmax(logits / self.refine_tau, tau=1.0, hard=True)
         else:
             raise ValueError(f"Unknown refine_mode: {self.refine_mode}")
+        
+    def _compute_traj_shift_hidden_loss(
+        self,
+        student_hidden_states,   # [B, L, D]
+        teacher_hidden_states,   # raw teacher hidden, NOT aligned/shifted
+        target_row_ids,          # [B, L]
+        target_col_ids,          # [B, L]
+        row_valid_mask,          # [B, L]
+    ):
+        """
+        Align left-to-right hidden trajectory on each target row.
+
+        Student side:
+            use source predictor positions whose target_row_ids == rid
+        Teacher side:
+            use the actual gold target-row token positions under the teacher's standard causal hidden states
+        """
+        assert target_row_ids is not None
+        assert target_col_ids is not None
+        assert row_valid_mask is not None
+        assert teacher_hidden_states is not None
+
+        B, L, D = student_hidden_states.shape
+        W = self.image_latent_width   # full row width incl. EOL
+        second_w = float(getattr(self, "traj_second_order_weight", 0.25))
+        normalize = bool(getattr(self, "traj_hidden_normalize", False))
+
+        losses = []
+
+        for b in range(B):
+            # first predictor position equals img_begin in your collator layout
+            valid_src = row_valid_mask[b].nonzero(as_tuple=False)
+            if valid_src.numel() == 0:
+                continue
+            img_begin = int(valid_src.min().item())
+
+            valid_rows = target_row_ids[b][row_valid_mask[b]].unique()
+            valid_rows = valid_rows[valid_rows >= 0]
+
+            for rid in valid_rows.tolist():
+                row_mask = row_valid_mask[b] & (target_row_ids[b] == rid)
+                if row_mask.sum() < 3:
+                    continue
+
+                cols = target_col_ids[b][row_mask]          # target columns for this row
+                order = torch.argsort(cols)
+                cols = cols[order].long()
+
+                # Student: source predictor hidden states ordered by target column
+                hs = student_hidden_states[b][row_mask][order]   # [W_row, D]
+
+                # Teacher: actual target-row token positions in the image token grid
+                teacher_idx = img_begin + rid * W + cols         # [W_row]
+                ht = teacher_hidden_states[b, teacher_idx, :]    # [W_row, D]
+
+                if normalize:
+                    hs = F.normalize(hs, p=2, dim=-1)
+                    ht = F.normalize(ht, p=2, dim=-1)
+
+                # first-order shifts
+                ds = hs[1:] - hs[:-1]
+                dt = ht[1:] - ht[:-1]
+
+                loss_row = F.smooth_l1_loss(ds, dt, reduction="none").sum(dim=-1).mean()
+
+                # optional second-order shifts (curvature)
+                if second_w > 0.0 and ds.shape[0] >= 2:
+                    d2s = ds[1:] - ds[:-1]
+                    d2t = dt[1:] - dt[:-1]
+                    loss_row = loss_row + second_w * F.smooth_l1_loss(d2s, d2t, reduction="none").sum(dim=-1).mean()
+
+                losses.append(loss_row)
+
+        if len(losses) == 0:
+            return student_hidden_states.new_zeros(())
+
+        return torch.stack(losses).mean()
 
     def forward(
         self,
@@ -418,7 +501,8 @@ class RowExpertModel(nn.Module):
                 ) and teacher_logits is None
             needs_teacher_hidden = (
                 self.use_mse or
-                self.use_row_rel
+                self.use_row_rel or
+                self.use_traj_shift_hidden
                 ) and teacher_hidden_states is None
             
             if needs_teacher_logits or needs_teacher_hidden:
@@ -578,47 +662,6 @@ class RowExpertModel(nn.Module):
 
                 loss = loss + self.topk_mass_weight * topk_mass_loss
             
-            # if self.use_topk_mass:
-            #     invalid = -100
-            #     valid_mask = (labels != invalid)
-            #     k = self.topk_mass_topk
-            #     T = float(getattr(self, "topk_mass_temp", 1.0))
-
-            #     teacher_topk_idx = aligned_teacher_logits.topk(k, dim=-1).indices
-
-            #     student_logprob = F.log_softmax(aligned_student_logits, dim=-1)
-            #     student_topk_logprob = torch.gather(
-            #         student_logprob, dim=-1, index=teacher_topk_idx,
-            #     ) #[B, T, K]
-            #     topk_mass_logprob = torch.logsumexp(student_topk_logprob, dim=-1)
-            #     topk_mass_loss = -topk_mass_logprob[valid_mask].mean()
-
-            #     output_dict["topk_mass_loss"] = topk_mass_loss.detach()
-            #     output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_logprob[valid_mask].exp().mean().detach()
-
-            #     teacher_topk_idx = aligned_teacher_logits.topk(k, dim=-1).indices
-            #     teacher_topk_logits, teacher_topk_idx = torch.topk(aligned_teacher_logits / T, k=k, dim=-1)
-
-            #     teacher_topk_prob = F.softmax(teacher_topk_logits / T, dim=-1)
-
-            #     student_logprob = F.log_softmax(aligned_student_logits / T, dim=-1)
-            #     student_topk_logprob = torch.gather(
-            #         student_logprob, dim=-1, index=teacher_topk_idx,
-            #     ) #[B, T, K]
-                
-            #     topk_mass_per_pos = -(teacher_topk_prob * student_topk_logprob).sum(dim=-1)
-            #     topk_mass_loss = topk_mass_per_pos[valid_mask].mean()
-
-            #     # No weighted:
-            #     # with torch.no_grad():
-            #     #     topk_mass_logprob = torch.logsumexp(student_topk_logprob, dim=-1)
-            #     #     output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_logprob[valid_mask].exp().mean().detach()
-
-            #     output_dict["topk_mass_loss"] = topk_mass_loss.detach()
-            #     output_dict[f"student_mass_on_teacher_top{k}"] = topk_mass_per_pos[valid_mask].exp().mean().detach()
-                
-            #     loss = loss + self.topk_mass_weight * topk_mass_loss
-            
             if self.use_mse:
                 invalid = -100
                 valid_mask = (labels != invalid)
@@ -663,7 +706,17 @@ class RowExpertModel(nn.Module):
                 
                 output_dict["row_rel_loss"] = row_rel_loss.detach()
                 loss = loss + self.row_rel_weight * row_rel_loss
-
+            
+            if self.use_traj_shift_hidden:
+                traj_shift_hidden_loss = self._compute_traj_shift_hidden_loss(
+                    student_hidden_states=student_hidden_states,
+                    teacher_hidden_states=teacher_hidden_states,   # raw teacher hidden, NOT aligned
+                    target_row_ids=target_row_ids,
+                    target_col_ids=target_col_ids,
+                    row_valid_mask=row_valid_mask,
+                )
+                output_dict["traj_shift_hidden_loss"] = traj_shift_hidden_loss.detach()
+                loss = loss + self.traj_shift_hidden_weight * traj_shift_hidden_loss
 
         output_dict["loss"] = loss
         return output_dict

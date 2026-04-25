@@ -48,7 +48,7 @@ if __name__ == "__main__":
     parser.add_argument("--do_save_token", action="store_true")
     parser.add_argument("--tinyar_path", type=str, default=None,
                         help="Path to tinyar_head.pt (enables TinyAR inference)")
-    parser.add_argument("--tinyar_layers", type=int, default=2)
+    parser.add_argument("--tinyar_layers", type=int, default=1)
     parser.add_argument("--tinyar_heads", type=int, default=8)
     parser.add_argument("--tinyar_W", type=int, default=24,
                         help="Row width the TinyAR head was trained with (Janus = 24)")

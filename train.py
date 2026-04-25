@@ -156,6 +156,7 @@ def train(args):
     use_mse = True if "mse" in losses else False
     use_topk_mass = True if "topk_mass" in losses else False
     use_rel_loss = True if "rel_loss" in losses else False
+    use_traj_shift_hidden = True if "traj_shift" in losses else False
 
     model = RowExpertModel(
         base_model,
@@ -195,6 +196,8 @@ def train(args):
         tinyar_weight=args.tinyar_weight,
         tinyar_layers=args.tinyar_layers,
         tinyar_heads=args.tinyar_heads,
+        use_traj_shift_hidden=use_traj_shift_hidden,
+        traj_shift_hidden_weight=args.traj_shift_hidden_weight,
     )
     
     if model_name == "janus":
@@ -305,7 +308,7 @@ if __name__ == "__main__":
     parser.add_argument("--image_height", type=int, default=48)
     parser.add_argument("--lora_rank", type=int, default=64)
     parser.add_argument("--lora_alpha", type=int, default=128)
-    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd", "tv", "acc", "topk_cover", "mse", "topk_mass", "rel_loss"], )
+    parser.add_argument("--losses", type=str, nargs="+", choices=["ce", "kd", "tv", "acc", "topk_cover", "mse", "topk_mass", "rel_loss", "traj_shift"], )
     parser.add_argument("--ce_weight", type=float, default=1.0)
     parser.add_argument("--kd_weight", type=float, default=1.0)
     parser.add_argument("--kd_temp", type=float, default=1.0)
@@ -322,6 +325,7 @@ if __name__ == "__main__":
     parser.add_argument("--topk_mass_weight", type=float, default=1.0)
     parser.add_argument("--topk_mass_topk", type=int, default=128)
     parser.add_argument("--row_rel_weight", type=float, default=1.0)
+    parser.add_argument("--traj_shift_hidden_weight", type=float, default=1.0)
     # Two-stage repairable draft training
     parser.add_argument("--refine_mode", type=str, default="none",
                         choices=["none", "deterministic_soft_topk", "soft_gumbel", "straight_through_hard"],
